@@ -1,0 +1,6 @@
+{
+  "city": "London",
+  "timezone_offset": 0,
+  "owm_key": "YOUR_OPENWEATHERMAP_API_KEY_HERE",
+  "volume": 25
+}

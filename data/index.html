@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ronnie Config Portal</title>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #0d0d12;
+      --surface: #16161f;
+      --border: #2a2a3a;
+      --accent: #f59e0b;
+      --accent2: #7c3aed;
+      --text: #e8e8f0;
+      --muted: #7070a0;
+      --danger: #ef4444;
+      --success: #22c55e;
+      --radius: 10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+      padding: 24px 16px 48px;
+    }
+
+    /* ── header ── */
+    .header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .header .face {
+      font-size: 48px;
+      line-height: 1;
+      margin-bottom: 8px;
+      animation: blink 5s infinite;
+    }
+
+    @keyframes blink {
+
+      0%,
+      94%,
+      100% {
+        opacity: 1;
+      }
+
+      95%,
+      99% {
+        opacity: 0;
+      }
+    }
+
+    .header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--accent);
+    }
+
+    .header p {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    /* ── tabs ── */
+    .tabs {
+      display: flex;
+      gap: 4px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px;
+      max-width: 520px;
+      margin: 0 auto 20px;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 8px 0;
+      border: none;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .tab-btn.active {
+      background: var(--accent);
+      color: #000;
+    }
+
+    .tab-btn:not(.active):hover {
+      color: var(--text);
+      background: var(--border);
+    }
+
+    /* ── panels ── */
+    .panel {
+      display: none;
+      max-width: 520px;
+      margin: 0 auto;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    /* ── card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .card h2 {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      margin-bottom: 16px;
+    }
+
+    /* ── form fields ── */
+    .field {
+      margin-bottom: 14px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+
+    .field input[type="text"],
+    .field input[type="password"],
+    .field input[type="number"],
+    .field input[type="time"],
+    .field input[type="date"],
+    .field select {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;   /* inputs don't inherit font-family by default */
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .field input:focus,
+    .field select:focus {
+      border-color: var(--accent);
+    }
+
+    .field .hint {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    /* volume slider */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+      cursor: pointer;
+      /* Don't set height here — it shrinks the drag target to 4 px.
+         Let the browser render the default thumb size. */
+    }
+
+    .slider-val {
+      min-width: 28px;
+      text-align: right;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    /* ── buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border: none;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;   /* buttons don't inherit font-family by default */
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    .btn:active {
+      transform: scale(0.97);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.88;
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      color: #fff;
+    }
+
+    .btn-danger:hover {
+      opacity: 0.82;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .btn-ghost:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 11px;
+    }
+
+    .btn-add {
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: 13px;
+      font-family: inherit;   /* buttons don't inherit font-family by default */
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-top: 8px;
+    }
+
+    .btn-add:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ── alarm / reminder list ── */
+    .list-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+
+    .list-item .time-badge {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      min-width: 70px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .list-item .item-meta {
+      flex: 1;
+    }
+
+    .list-item .item-label {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .list-item .item-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* ── add form (collapsed/expanded) ── */
+    .add-form {
+      background: var(--bg);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-top: 10px;
+      display: none;
+    }
+
+    .add-form.open {
+      display: block;
+    }
+
+    .add-form-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .add-form-row .field {
+      flex: 1;
+    }
+
+    .add-form-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    /* ── toast ── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 30px;
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      transition: transform 0.3s ease;
+      z-index: 999;
+      pointer-events: none;
+    }
+
+    #toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    #toast.ok {
+      border-color: var(--success);
+      color: var(--success);
+    }
+
+    #toast.err {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    /* ── status dot ── */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .dot.online {
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 20px 0;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="header">
+    <div class="face">( ◕ ‿ ◕ )</div>
+    <h1>RONNIE</h1>
+    <p>Configuration Portal</p>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-config" onclick="showTab('config')">⚙ Config</button>
+    <button class="tab-btn" id="tab-alarms" onclick="showTab('alarms')">⏰ Alarms</button>
+    <button class="tab-btn" id="tab-reminders" onclick="showTab('reminders')">📋 Reminders</button>
+  </div>
+
+  <!-- ══════════════════════ CONFIG ══════════════════════ -->
+  <div class="panel active" id="panel-config">
+    <div class="card">
+      <h2>Device Status</h2>
+      <div class="status-row">
+        <!-- dot starts grey/offline — loadConfig() sets it to online on success -->
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Weather</h2>
+      <div class="field">
+        <label>City</label>
+        <input type="text" id="cfg-city" placeholder="London">
+      </div>
+      <div class="field">
+        <label>OpenWeatherMap API Key</label>
+        <input type="password" id="cfg-key" placeholder="Your OWM key" autocomplete="off">
+        <div class="hint">Get a free key at openweathermap.org</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Time</h2>
+      <div class="field">
+        <label>Timezone Offset (seconds from UTC)</label>
+        <input type="number" id="cfg-tz" placeholder="e.g. 28800 for UTC+8" step="3600">
+        <div class="hint">UTC+8 = 28800 &nbsp;|&nbsp; UTC+0 = 0 &nbsp;|&nbsp; UTC-5 = -18000</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Audio</h2>
+      <div class="field">
+        <label>Volume &nbsp;<span id="vol-label" class="slider-val">25</span></label>
+        <div class="slider-row">
+          <span style="color:var(--muted);font-size:11px">0</span>
+          <input type="range" id="cfg-vol" min="0" max="30" value="25"
+            oninput="document.getElementById('vol-label').textContent=this.value">
+          <span style="color:var(--muted);font-size:11px">30</span>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveConfig()" style="width:100%">
+      💾 &nbsp;Save Config — Restart Ronnie After
+    </button>
+  </div>
+
+  <!-- ══════════════════════ ALARMS ══════════════════════ -->
+  <div class="panel" id="panel-alarms">
+    <div class="card">
+      <h2>Alarms</h2>
+      <div id="alarm-list">
+        <div class="empty">No alarms set</div>
+      </div>
+
+      <button class="btn-add" id="alarm-add-btn" onclick="toggleAddAlarm()">
+        + Add Alarm
+      </button>
+      <div class="add-form" id="alarm-add-form">
+        <div class="field">
+          <label>Time</label>
+          <input type="time" id="new-alarm-time">
+        </div>
+        <div class="add-form-actions">
+          <button class="btn btn-primary" onclick="addAlarm()">Add</button>
+          <button class="btn btn-ghost" onclick="toggleAddAlarm()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveAlarms()" style="width:100%">
+      💾 &nbsp;Save Alarms
+    </button>
+  </div>
+
+  <!-- ══════════════════════ REMINDERS ══════════════════════ -->
+  <div class="panel" id="panel-reminders">
+    <div class="card">
+      <h2>Reminders</h2>
+      <div id="reminder-list">
+        <div class="empty">Could not load reminders</div>
+      </div>
+
+      <button class="btn-add" id="reminder-add-btn" onclick="toggleAddReminder()">
+        + Add Reminder
+      </button>
+      <div class="add-form" id="reminder-add-form">
+        <div class="add-form-row">
+          <div class="field">
+            <label>Date (leave blank = daily)</label>
+            <input type="date" id="new-rem-date">
+          </div>
+          <div class="field">
+            <label>Time</label>
+            <input type="time" id="new-rem-time">
+          </div>
+        </div>
+        <div class="field">
+          <label>Note (shown on OLED)</label>
+          <input type="text" id="new-rem-text" placeholder="e.g. Take meds" maxlength="63">
+        </div>
+        <div class="add-form-actions">
+          <button class="btn btn-primary" onclick="addReminder()">Add</button>
+          <button class="btn btn-ghost" onclick="toggleAddReminder()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveReminders()" style="width:100%">
+      💾 &nbsp;Save Reminders
+    </button>
+  </div>
+
+  <!-- toast starts empty and off-screen; JS adds content + class when triggered -->
+  <div id="toast"></div>
+
+  <script>
+    // ── state ──
+    let alarms = [];
+    let reminders = [];
+
+    // ── tab switching ──
+    function showTab(name) {
+      ['config', 'alarms', 'reminders'].forEach(t => {
+        document.getElementById('panel-' + t).classList.toggle('active', t === name);
+        document.getElementById('tab-' + t).classList.toggle('active', t === name);
+      });
+    }
+
+    // ── toast ──
+    let toastTimer;
+    function toast(msg, ok = true) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'show ' + (ok ? 'ok' : 'err');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.className = '', 2800);
+    }
+
+    // ── helpers ──
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function fmtTime(h, m) { return pad(h) + ':' + pad(m); }
+
+    // ── CONFIG ──
+    async function loadConfig() {
+      try {
+        const r = await fetch('/config');
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        document.getElementById('cfg-city').value = d.city || '';
+        document.getElementById('cfg-key').value = d.owm_key || '';
+        document.getElementById('cfg-tz').value = d.timezone_offset != null ? d.timezone_offset : 0;
+        const vol = d.volume != null ? d.volume : 25;
+        document.getElementById('cfg-vol').value = vol;
+        document.getElementById('vol-label').textContent = vol;
+        // Update status to reflect a live connection
+        document.getElementById('status-dot').classList.add('online');
+        document.getElementById('status-text').textContent = 'Connected to Ronnie';
+      } catch {
+        // Device not reachable — update status and show toast
+        document.getElementById('status-dot').classList.remove('online');
+        document.getElementById('status-text').textContent = 'Cannot connect to Ronnie';
+        toast('Could not load config', false);
+      }
+    }
+
+    async function saveConfig() {
+      const body = {
+        city: document.getElementById('cfg-city').value.trim(),
+        owm_key: document.getElementById('cfg-key').value.trim(),
+        timezone_offset: parseInt(document.getElementById('cfg-tz').value) || 0,
+        volume: parseInt(document.getElementById('cfg-vol').value)
+      };
+      try {
+        const r = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        toast(r.ok ? '✓ Config saved — please restart Ronnie' : '✗ Save failed', r.ok);
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    // ── ALARMS ──
+    async function loadAlarms() {
+      try {
+        const r = await fetch('/alarms');
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        alarms = d.alarms || [];
+        renderAlarms();
+      } catch {
+        document.getElementById('alarm-list').innerHTML = '<div class="empty">Could not load alarms</div>';
+      }
+    }
+
+    function renderAlarms() {
+      const el = document.getElementById('alarm-list');
+      if (!alarms.length) { el.innerHTML = '<div class="empty">No alarms set</div>'; return; }
+      el.innerHTML = alarms.map((a, i) => `
+    <div class="list-item" id="alarm-${i}">
+      <div class="time-badge">${fmtTime(a.h, a.m)}</div>
+      <div class="item-meta">
+        <div class="item-label">Daily alarm</div>
+        <div class="item-sub">${a.triggered ? 'Triggered today' : 'Pending'}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="deleteAlarm(${i})">✕</button>
+    </div>`).join('');
+    }
+
+    function toggleAddAlarm() {
+      const f = document.getElementById('alarm-add-form');
+      f.classList.toggle('open');
+      if (f.classList.contains('open')) document.getElementById('new-alarm-time').value = '';
+    }
+
+    function addAlarm() {
+      const t = document.getElementById('new-alarm-time').value;
+      if (!t) { toast('Pick a time', false); return; }
+      const [h, m] = t.split(':').map(Number);
+      alarms.push({ h, m, triggered: false });
+      renderAlarms();
+      document.getElementById('alarm-add-form').classList.remove('open');
+    }
+
+    function deleteAlarm(i) {
+      alarms.splice(i, 1);
+      renderAlarms();
+    }
+
+    async function saveAlarms() {
+      try {
+        const r = await fetch('/alarms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alarms })
+        });
+        toast(r.ok ? '✓ Alarms saved' : '✗ Save failed', r.ok);
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    // ── REMINDERS ──
+    async function loadReminders() {
+      try {
+        const r = await fetch('/reminders');
+        if (!r.ok) throw new Error();
+        const d = await r.json();
+        reminders = d.reminders || [];
+        renderReminders();
+      } catch {
+        document.getElementById('reminder-list').innerHTML = '<div class="empty">Could not load reminders</div>';
+      }
+    }
+
+    function renderReminders() {
+      const el = document.getElementById('reminder-list');
+      if (!reminders.length) { el.innerHTML = '<div class="empty">No reminders set</div>'; return; }
+      el.innerHTML = reminders.map((r, i) => {
+        const dateStr = r.day
+          ? `${pad(r.day)}/${pad(r.month)}${r.year ? '/' + r.year : ''}`
+          : 'Every day';
+        return `
+    <div class="list-item">
+      <div class="time-badge">${fmtTime(r.hour, r.minute)}</div>
+      <div class="item-meta">
+        <div class="item-label">${r.text || 'Reminder'}</div>
+        <div class="item-sub">${dateStr}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="deleteReminder(${i})">✕</button>
+    </div>`;
+      }).join('');
+    }
+
+    function toggleAddReminder() {
+      const f = document.getElementById('reminder-add-form');
+      f.classList.toggle('open');
+      if (f.classList.contains('open')) {
+        document.getElementById('new-rem-date').value = '';
+        document.getElementById('new-rem-time').value = '';
+        document.getElementById('new-rem-text').value = '';
+      }
+    }
+
+    function addReminder() {
+      const t = document.getElementById('new-rem-time').value;
+      const txt = document.getElementById('new-rem-text').value.trim();
+      const date = document.getElementById('new-rem-date').value;   // "YYYY-MM-DD" or ""
+      if (!t) { toast('Pick a time', false); return; }
+      if (!txt) { toast('Enter a note', false); return; }
+      const [hour, minute] = t.split(':').map(Number);
+      let day = 0, month = 0, year = 0;
+      if (date) {
+        const [y, mo, d] = date.split('-').map(Number);
+        day = d; month = mo; year = y;
+      }
+      reminders.push({ hour, minute, day, month, year, text: txt, mp3: 10, triggered: false });
+      renderReminders();
+      document.getElementById('reminder-add-form').classList.remove('open');
+    }
+
+    function deleteReminder(i) {
+      reminders.splice(i, 1);
+      renderReminders();
+    }
+
+    async function saveReminders() {
+      try {
+        const r = await fetch('/reminders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reminders })
+        });
+        toast(r.ok ? '✓ Reminders saved' : '✗ Save failed', r.ok);
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    // ── init ──
+    loadConfig();
+    loadAlarms();
+    loadReminders();
+  </script>
+
+
+</body>
+
+</html>
