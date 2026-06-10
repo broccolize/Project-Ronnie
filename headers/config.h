@@ -7,6 +7,7 @@
 struct AppConfig {
   String city;
   String owmKey;
+  String ttsKey;          // V4-6: ElevenLabs API key
   long   timezoneOffset;
   int    volume;
 };
