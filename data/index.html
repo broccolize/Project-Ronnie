@@ -419,9 +419,10 @@
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" id="tab-config" onclick="showTab('config')">⚙ Config</button>
-    <button class="tab-btn" id="tab-alarms" onclick="showTab('alarms')">⏰ Alarms</button>
-    <button class="tab-btn" id="tab-reminders" onclick="showTab('reminders')">📋 Reminders</button>
+    <button class="tab-btn active" id="tab-config"    onclick="showTab('config')">⚙ Config</button>
+    <button class="tab-btn"        id="tab-alarms"    onclick="showTab('alarms')">⏰ Alarms</button>
+    <button class="tab-btn"        id="tab-reminders" onclick="showTab('reminders')">📋 Reminders</button>
+    <button class="tab-btn"        id="tab-tasks"     onclick="showTab('tasks')">🎙 Tasks</button>
   </div>
 
   <!-- ══════════════════════ CONFIG ══════════════════════ -->
@@ -439,12 +440,22 @@
       <h2>Weather</h2>
       <div class="field">
         <label>City</label>
-        <input type="text" id="cfg-city" placeholder="London">
+        <input type="text" id="cfg-city" placeholder="Auto-detected on WiFi connect">
+        <div class="hint">Leave blank — Ronnie auto-detects your city via WiFi geolocation</div>
       </div>
       <div class="field">
         <label>OpenWeatherMap API Key</label>
         <input type="password" id="cfg-key" placeholder="Your OWM key" autocomplete="off">
         <div class="hint">Get a free key at openweathermap.org</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Voice (TTS)</h2>
+      <div class="field">
+        <label>ElevenLabs API Key</label>
+        <input type="password" id="cfg-tts" placeholder="Your ElevenLabs key" autocomplete="off">
+        <div class="hint">Free tier: 10,000 chars/month — get yours at elevenlabs.io</div>
       </div>
     </div>
 
@@ -541,6 +552,40 @@
     </button>
   </div>
 
+  <!-- ══════════════════════ TASKS ══════════════════════ -->
+  <div class="panel" id="panel-tasks">
+    <div class="card">
+      <h2>Voice Tasks</h2>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
+        Define words you'll say to set reminders. After adding a task, click
+        <strong style="color:var(--accent)">Enroll Voice</strong> — Ronnie will beep
+        and you say the word clearly.
+      </p>
+
+      <div id="task-list">
+        <div class="empty">Loading tasks…</div>
+      </div>
+
+      <button class="btn-add" id="task-add-btn" onclick="toggleAddTask()">
+        + Add Task Word
+      </button>
+      <div class="add-form" id="task-add-form">
+        <div class="field">
+          <label>Word to say (e.g. pills)</label>
+          <input type="text" id="new-task-label" placeholder="pills" maxlength="32">
+        </div>
+        <div class="field">
+          <label>Reminder text shown on OLED (e.g. Take pills)</label>
+          <input type="text" id="new-task-text" placeholder="Take pills" maxlength="63">
+        </div>
+        <div class="add-form-actions">
+          <button class="btn btn-primary" onclick="addTask()">Add</button>
+          <button class="btn btn-ghost"   onclick="toggleAddTask()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- toast starts empty and off-screen; JS adds content + class when triggered -->
   <div id="toast"></div>
 
@@ -551,10 +596,12 @@
 
     // ── tab switching ──
     function showTab(name) {
-      ['config', 'alarms', 'reminders'].forEach(t => {
+      ['config', 'alarms', 'reminders', 'tasks'].forEach(t => {
         document.getElementById('panel-' + t).classList.toggle('active', t === name);
-        document.getElementById('tab-' + t).classList.toggle('active', t === name);
+        document.getElementById('tab-'   + t).classList.toggle('active', t === name);
       });
+      // Lazy-load tasks on first visit to that tab
+      if (name === 'tasks') loadTasks();
     }
 
     // ── toast ──
@@ -578,8 +625,9 @@
         if (!r.ok) throw new Error();
         const d = await r.json();
         document.getElementById('cfg-city').value = d.city || '';
-        document.getElementById('cfg-key').value = d.owm_key || '';
-        document.getElementById('cfg-tz').value = d.timezone_offset != null ? d.timezone_offset : 0;
+        document.getElementById('cfg-key').value  = d.owm_key || '';
+        document.getElementById('cfg-tts').value  = d.tts_key || '';   // V4-6
+        document.getElementById('cfg-tz').value   = d.timezone_offset != null ? d.timezone_offset : 0;
         const vol = d.volume != null ? d.volume : 25;
         document.getElementById('cfg-vol').value = vol;
         document.getElementById('vol-label').textContent = vol;
@@ -596,10 +644,11 @@
 
     async function saveConfig() {
       const body = {
-        city: document.getElementById('cfg-city').value.trim(),
-        owm_key: document.getElementById('cfg-key').value.trim(),
-        timezone_offset: parseInt(document.getElementById('cfg-tz').value) || 0,
-        volume: parseInt(document.getElementById('cfg-vol').value)
+        city:             document.getElementById('cfg-city').value.trim(),
+        owm_key:          document.getElementById('cfg-key').value.trim(),
+        tts_key:          document.getElementById('cfg-tts').value.trim(),   // V4-6
+        timezone_offset:  parseInt(document.getElementById('cfg-tz').value) || 0,
+        volume:           parseInt(document.getElementById('cfg-vol').value)
       };
       try {
         const r = await fetch('/config', {
@@ -741,6 +790,103 @@
           body: JSON.stringify({ reminders })
         });
         toast(r.ok ? '✓ Reminders saved' : '✗ Save failed', r.ok);
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    // ── TASKS (V4-2) ──
+    let tasks = [];
+
+    async function loadTasks() {
+      try {
+        const r = await fetch('/tasks');
+        if (!r.ok) throw new Error();
+        tasks = await r.json();
+        renderTasks();
+      } catch {
+        document.getElementById('task-list').innerHTML =
+          '<div class="empty">Could not load tasks</div>';
+      }
+    }
+
+    function renderTasks() {
+      const el = document.getElementById('task-list');
+      if (!tasks || !tasks.length) {
+        el.innerHTML = '<div class="empty">No task words defined yet</div>';
+        return;
+      }
+      el.innerHTML = tasks.map((t, i) => `
+        <div class="list-item" id="task-${i}">
+          <div class="item-meta">
+            <div class="item-label">
+              <strong style="color:var(--accent)">${t.label}</strong>
+              &rarr; &ldquo;${t.text}&rdquo;
+            </div>
+            <div class="item-sub">
+              ${t.enrolled
+                ? '<span style="color:var(--success)">&#10003; Enrolled</span>'
+                : '<span style="color:#f59e0b">&#9888; Not enrolled — click Enroll Voice</span>'}
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm"
+            onclick="enrollTask('${t.label}')">
+            ${t.enrolled ? 'Re-enroll' : 'Enroll Voice'}
+          </button>
+          <button class="btn btn-danger btn-sm"
+            onclick="deleteTask('${t.label}')">✕</button>
+        </div>`).join('');
+    }
+
+    function toggleAddTask() {
+      const f = document.getElementById('task-add-form');
+      f.classList.toggle('open');
+      if (f.classList.contains('open')) {
+        document.getElementById('new-task-label').value = '';
+        document.getElementById('new-task-text').value  = '';
+      }
+    }
+
+    async function addTask() {
+      const label = document.getElementById('new-task-label').value.trim().toLowerCase();
+      const text  = document.getElementById('new-task-text').value.trim();
+      if (!label) { toast('Enter the word to say', false); return; }
+      if (!text)  { toast('Enter the reminder text', false); return; }
+      try {
+        const r = await fetch('/tasks', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ label, text })
+        });
+        const msg = await r.text();
+        toast(r.ok ? '✓ ' + msg : '✗ ' + msg, r.ok);
+        if (r.ok) { document.getElementById('task-add-form').classList.remove('open'); loadTasks(); }
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    async function enrollTask(label) {
+      toast('Ronnie will beep — say "' + label + '" clearly after the beep');
+      try {
+        const r = await fetch('/enroll', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ label })
+        });
+        const msg = await r.text();
+        toast(r.ok ? '✓ ' + msg : '✗ ' + msg, r.ok);
+        // Reload task list after ~4 s to show updated enrolled status
+        if (r.ok) setTimeout(() => loadTasks(), 4000);
+      } catch { toast('✗ Connection error', false); }
+    }
+
+    async function deleteTask(label) {
+      if (!confirm('Delete task "' + label + '"? This also removes the voice sample.')) return;
+      try {
+        const r = await fetch('/tasks/delete', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ label })
+        });
+        toast(r.ok ? '✓ Deleted' : '✗ Delete failed', r.ok);
+        if (r.ok) loadTasks();
       } catch { toast('✗ Connection error', false); }
     }
 

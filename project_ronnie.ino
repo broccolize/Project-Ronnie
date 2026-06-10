@@ -5,6 +5,8 @@
 #include <RTClib.h>
 #include <ArduinoJson.h>
 #include <DFRobotDFPlayerMini.h>
+#include <HTTPClient.h>         // V4-7: needed for autoDetectCity()
+#include <WiFiClientSecure.h>   // V4-7: needed for autoDetectCity()
 #include "config.h"     // AppConfig struct + extern appConfig
 #include "face.h"
 #include "voice.h"
@@ -13,6 +15,8 @@
 #include "reminder.h"
 #include "battery.h"
 #include "webserver.h"
+#include "enrollment.h" // V4-2: voice task enrollment
+#include "tts.h"        // V4-6: ElevenLabs TTS
 
 // dfPlayer declared here; extern in headers that need it
 HardwareSerial dfSerial(2);
@@ -29,22 +33,61 @@ bool wifiConnected = false;
 // Storage (definition) stays here; every other module uses the extern.
 AppConfig appConfig;
 
+// V4-2: Enrollment request flags — set by /enroll web endpoint, consumed in loop()
+String pendingEnrollLabel = "";
+bool   enrollRequested    = false;
+
 // Guard: setupWebServer() / server.begin() must only be called once.
 bool serverStarted = false;
 
 void loadConfig() {
-    appConfig = { "London", "", 0, 25 };  // safe defaults
+    appConfig = { "London", "", "", 0, 25 };  // safe defaults (city, owmKey, ttsKey, tz, volume)
     if (!LittleFS.exists("/config.json")) return;
     File f = LittleFS.open("/config.json", "r");
     if (!f) return;
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(2048);  // increased from 512 to hold tasks array (V4-2)
     if (!deserializeJson(doc, f)) {
         appConfig.city           = doc["city"]            | "London";
         appConfig.owmKey         = doc["owm_key"]         | "";
+        appConfig.ttsKey         = doc["tts_key"]         | "";  // V4-6
         appConfig.timezoneOffset = doc["timezone_offset"] | 0L;
         appConfig.volume         = doc["volume"]          | 25;
     }
     f.close();
+}
+
+// V4-7: Auto geolocation via ip-api.com — called once after WiFi connects.
+// Detects city from the device's public IP and saves it to config.json.
+void autoDetectCity() {
+    HTTPClient http;
+    http.begin("http://ip-api.com/json");
+    http.setTimeout(5000);
+    int code = http.GET();
+    if (code != 200) { http.end(); return; }
+
+    DynamicJsonDocument doc(512);
+    deserializeJson(doc, http.getStream());
+    http.end();
+
+    String city    = doc["city"]    | "";
+    String country = doc["country"] | "";
+    if (city.isEmpty()) return;
+
+    // Read existing config, update city + country, write back
+    File rf = LittleFS.open("/config.json", "r");
+    DynamicJsonDocument cfg(2048);
+    deserializeJson(cfg, rf);
+    rf.close();
+    cfg["city"]    = city;
+    cfg["country"] = country;
+    File wf = LittleFS.open("/config.json", "w");
+    serializeJson(cfg, wf);
+    wf.close();
+
+    appConfig.city = city;
+    Serial.printf("Auto-detected city: %s, %s\n", city.c_str(), country.c_str());
+    showText("Location:", city.c_str(), country.c_str());
+    delay(2000);
 }
 
 // Config button: hold GPIO 4 for 3 s to enter web config
@@ -88,6 +131,7 @@ void setup() {
     wifiConnected = wm.autoConnect("Ronnie-Setup");
 
     if (wifiConnected) {
+        autoDetectCity();  // V4-7 — detect city from WiFi IP before NTP
         timeClient.begin();
         if (timeClient.update()) {
             rtc.adjust(DateTime(timeClient.getEpochTime()));
@@ -102,6 +146,8 @@ void setup() {
     alarm_setup();
     reminder_setup();
     battery_setup();
+    enrollment_setup();  // V4-2 — load enrolled voice samples from SD
+    tts_setup();         // V4-6 — prepare SD TTS cache directory
 
     drawFace(IDLE);
     dfPlayer.play(1);
@@ -110,6 +156,14 @@ void setup() {
 void loop() {
     voice_loop();
     reminder_tick();  // fires delayed reminder MP3 when its timer expires
+
+    // V4-2: Handle voice enrollment triggered from web portal /enroll endpoint
+    if (enrollRequested) {
+        enrollRequested = false;
+        drawFace(THINKING);
+        enrollment_record(pendingEnrollLabel);
+        drawFace(IDLE);
+    }
 
     // Trigger weather after Good Morning greeting has finished playing
     if (gmWeatherScheduledAt > 0 && millis() > gmWeatherScheduledAt) {
