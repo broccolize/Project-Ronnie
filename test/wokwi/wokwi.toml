@@ -1,0 +1,8 @@
+[wokwi]
+version = 1
+elf = "../../build/project_ronnie.ino.elf"
+firmware = "../../build/project_ronnie.ino.bin"
+
+# Wokwi CLI / VS Code extension reads this file from the project root.
+# Move wokwi.toml and diagram.json to the project root before running.
+# See README in this folder for instructions.

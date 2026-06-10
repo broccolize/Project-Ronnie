@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "author": "Project Ronnie",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-v1",
+      "id":   "esp32",
+      "top":  0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-ssd1306",
+      "id":   "oled",
+      "top":  -120,
+      "left": 200,
+      "attrs": { "i2cAddress": "0x3c" }
+    },
+    {
+      "type": "wokwi-ds1307",
+      "id":   "rtc",
+      "top":  80,
+      "left": 230,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id":   "touch_btn",
+      "top":  -50,
+      "left": -80,
+      "attrs": { "color": "green", "label": "Double-tap (alarm dismiss)" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id":   "config_btn",
+      "top":  0,
+      "left": -80,
+      "attrs": { "color": "blue", "label": "Config (hold 3s)" }
+    },
+    {
+      "type": "wokwi-led",
+      "id":   "led_wifi",
+      "top":  -160,
+      "left": -80,
+      "attrs": { "color": "green", "label": "WiFi" }
+    },
+    {
+      "type": "wokwi-led",
+      "id":   "led_alarm",
+      "top":  -140,
+      "left": -80,
+      "attrs": { "color": "red", "label": "Alarm" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id":   "r_touch",
+      "top":  -20,
+      "left": -40,
+      "attrs": { "value": "10000" }
+    }
+  ],
+  "connections": [
+    [ "esp32:3V3",  "oled:VCC",   "red",    [] ],
+    [ "esp32:GND",  "oled:GND",   "black",  [] ],
+    [ "esp32:D21",  "oled:SDA",   "blue",   [] ],
+    [ "esp32:D22",  "oled:SCL",   "yellow", [] ],
+
+    [ "esp32:3V3",  "rtc:VCC",    "red",    [] ],
+    [ "esp32:GND",  "rtc:GND",    "black",  [] ],
+    [ "esp32:D21",  "rtc:SDA",    "blue",   [] ],
+    [ "esp32:D22",  "rtc:SCL",    "yellow", [] ],
+
+    [ "touch_btn:1.l", "esp32:D34",  "green",  [] ],
+    [ "touch_btn:2.l", "esp32:GND",  "black",  [] ],
+
+    [ "config_btn:1.l", "esp32:D4",  "blue",   [] ],
+    [ "config_btn:2.l", "esp32:GND", "black",  [] ],
+
+    [ "esp32:D2",   "led_wifi:A",  "green",  [] ],
+    [ "led_wifi:K", "esp32:GND",   "black",  [] ],
+
+    [ "esp32:D5",   "led_alarm:A", "red",    [] ],
+    [ "led_alarm:K","esp32:GND",   "black",  [] ]
+  ],
+  "dependencies": {}
+}
