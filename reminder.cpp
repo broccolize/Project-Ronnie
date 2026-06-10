@@ -5,21 +5,19 @@
 #include "face.h"
 
 extern DFRobotDFPlayerMini dfPlayer;
+extern SemaphoreHandle_t   fsMutex;
 
 #define MAX_REMINDERS 10
-
-// Reminder struct is declared in reminder.h — do not redefine here.
 
 Reminder reminders[MAX_REMINDERS];
 int      reminderCount = 0;
 
-// Persist triggered flags so a reboot doesn't re-fire the same reminder
 void reminder_save_triggered() {
-    DynamicJsonDocument doc(2048);
-    JsonArray arr = doc.createNestedArray("reminders");
+    JsonDocument doc;
+    JsonArray arr = doc["reminders"].to<JsonArray>();
     for (int i = 0; i < reminderCount; i++) {
         Reminder& r  = reminders[i];
-        JsonObject o = arr.createNestedObject();
+        JsonObject o = arr.add<JsonObject>();
         o["hour"]      = r.hour;
         o["minute"]    = r.minute;
         o["day"]       = r.day;
@@ -29,20 +27,23 @@ void reminder_save_triggered() {
         o["text"]      = r.text;
         o["triggered"] = r.triggered;
     }
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
     File f = LittleFS.open("/reminders.json", "w");
     serializeJson(doc, f);
     f.close();
+    xSemaphoreGive(fsMutex);
 }
 
-// Load reminders from disk into the in-memory array.
-// Called by both reminder_setup() and reminder_reload().
 void reminder_reload() {
-    reminderCount = 0;  // clear existing in-memory state
-    if (!LittleFS.exists("/reminders.json")) return;
+    reminderCount = 0;
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
+    bool exists = LittleFS.exists("/reminders.json");
+    if (!exists) { xSemaphoreGive(fsMutex); return; }
     File f = LittleFS.open("/reminders.json", "r");
-    DynamicJsonDocument doc(2048);
+    JsonDocument doc;
     deserializeJson(doc, f);
     f.close();
+    xSemaphoreGive(fsMutex);
     for (JsonObject r : doc["reminders"].as<JsonArray>()) {
         if (reminderCount >= MAX_REMINDERS) break;
         Reminder rem  = {};
@@ -58,28 +59,38 @@ void reminder_reload() {
     }
 }
 
-void reminder_setup() {
-    reminder_reload();  // load persisted reminders from disk
+void reminder_setup() { reminder_reload(); }
+
+// Small queue so simultaneous reminders don't lose each other (max 3 pending).
+#define PENDING_QUEUE_SIZE 3
+static int           pendingMp3Queue[PENDING_QUEUE_SIZE] = {};
+static unsigned long pendingMp3At[PENDING_QUEUE_SIZE]    = {};
+static int           pendingHead = 0;
+static int           pendingTail = 0;
+
+static void enqueue_mp3(int mp3, unsigned long fireAt) {
+    int next = (pendingTail + 1) % PENDING_QUEUE_SIZE;
+    if (next == pendingHead) return;  // queue full — drop oldest would be worse
+    pendingMp3Queue[pendingTail] = mp3;
+    pendingMp3At[pendingTail]    = fireAt;
+    pendingTail = next;
 }
 
-// Non-blocking state machine: plays the task MP3 after the prefix finishes
-static int           pendingReminderMp3 = 0;
-static unsigned long reminderMp3At     = 0;
-
 void reminder_tick() {
-    if (pendingReminderMp3 > 0 && millis() > reminderMp3At) {
-        dfPlayer.play(pendingReminderMp3);
-        pendingReminderMp3 = 0;
+    while (pendingHead != pendingTail) {
+        if (millis() > pendingMp3At[pendingHead]) {
+            dfPlayer.play(pendingMp3Queue[pendingHead]);
+            pendingHead = (pendingHead + 1) % PENDING_QUEUE_SIZE;
+        } else {
+            break;  // queue is ordered by fire time; stop at first future entry
+        }
     }
 }
 
 void reminder_check(DateTime now) {
-    // Clear triggered flags at midnight so daily reminders re-arm
     static int lastDay = -1;
     if (now.day() != lastDay) {
-        for (int i = 0; i < reminderCount; i++) {
-            reminders[i].triggered = false;
-        }
+        for (int i = 0; i < reminderCount; i++) reminders[i].triggered = false;
         lastDay = now.day();
         reminder_save_triggered();
     }
@@ -96,24 +107,20 @@ void reminder_check(DateTime now) {
         if (timeMatch && dayMatch && monMatch && yearMatch) {
             r.triggered = true;
             reminder_save_triggered();
-            showText("REMINDER", r.text, NULL);
-            dfPlayer.play(7);  // prefix: "You are forgetting something..."
-            // Schedule task MP3 2.5 s later via reminder_tick()
-            pendingReminderMp3 = r.mp3;
-            reminderMp3At      = millis() + 2500;
-            drawFace(SPEAKING);
+            face_set_reminder_text(r.text);
+            drawFace(REMINDER_SHOW);
+            dfPlayer.play(7);  // "You are forgetting something..."
+            enqueue_mp3(r.mp3, millis() + 2500);
         }
     }
 }
 
-// V4-1: Save a reminder created entirely by voice command at runtime.
-// Called from voice.cpp after the 3-stage listening flow completes.
 void reminder_add_voice(Reminder r) {
     if (reminderCount >= MAX_REMINDERS) {
-        dfPlayer.play(99);  // "Sorry, I didn't catch that" — max reached
+        dfPlayer.play(99);
         return;
     }
     r.triggered = false;
     reminders[reminderCount++] = r;
-    reminder_save_triggered();  // persist to LittleFS immediately
+    reminder_save_triggered();
 }

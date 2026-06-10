@@ -14,7 +14,7 @@ WeatherData fetchWeather() {
     }
 
     WiFiClientSecure client;
-    client.setInsecure();
+    client.setInsecure();  // TODO: pin OWM cert fingerprint for production
     HTTPClient http;
 
     String url = "https://api.openweathermap.org/data/2.5/weather?q="
@@ -33,18 +33,20 @@ WeatherData fetchWeather() {
         return wd;
     }
 
-    DynamicJsonDocument doc(1536);
+    JsonDocument doc;
     deserializeJson(doc, http.getStream());
     http.end();
 
-    wd.feelsLike     = doc["main"]["feels_like"];
-    String main      = doc["weather"][0]["main"].as<String>();
-    float  rainAmount = 0;
-
-    if (doc.containsKey("rain")) {
-        rainAmount = doc["rain"]["1h"] | doc["rain"]["3h"] | 0.0f;
-    }
+    wd.feelsLike  = doc["main"]["feels_like"] | 0.0f;
+    String main   = doc["weather"][0]["main"].as<String>();
     int cloudCover = doc["clouds"]["all"] | 0;
+
+    float rainAmount = 0.0f;
+    if (doc["rain"].is<JsonObject>()) {
+        // "1h" takes priority; fall back to "3h" if only the 3-hour bucket is present
+        if (!doc["rain"]["1h"].isNull())      rainAmount = doc["rain"]["1h"].as<float>();
+        else if (!doc["rain"]["3h"].isNull()) rainAmount = doc["rain"]["3h"].as<float>();
+    }
 
     if (main == "Rain" || main == "Drizzle" || main == "Thunderstorm") {
         wd.condition = "Rainy";
@@ -56,8 +58,8 @@ WeatherData fetchWeather() {
         wd.condition = "Mild Cloudy";
     }
 
-    wd.playUmbrella    = (rainAmount > 0.1 || main == "Rain" || main == "Drizzle");
-    wd.playWarmClothes = (wd.feelsLike <= 16.0);
+    wd.playUmbrella    = (rainAmount > 0.1f || main == "Rain" || main == "Drizzle");
+    wd.playWarmClothes = (wd.feelsLike <= 16.0f);
 
     if      (wd.playUmbrella)         wd.suggestion = "Bring an umbrella!";
     else if (wd.playWarmClothes)      wd.suggestion = "Dress warmly today";

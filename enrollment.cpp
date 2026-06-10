@@ -6,58 +6,37 @@
 #include "face.h"
 
 extern DFRobotDFPlayerMini dfPlayer;
+extern SemaphoreHandle_t   fsMutex;
 
 #define ENROLL_SAMPLE_COUNT 16000   // 1 second at 16 kHz, 16-bit
 #define MAX_TASKS           20
 
-// All enrolled samples are loaded into RAM at boot so matching is fast
-// (no SD reads per inference).
-static int16_t enrolledSamples[MAX_TASKS][ENROLL_SAMPLE_COUNT];
-static String  enrolledLabels[MAX_TASKS];
-static String  enrolledTexts[MAX_TASKS];
-static int     enrolledCount = 0;
+// Only labels and display texts are kept in RAM — sample audio stays on the SD
+// card and is loaded one at a time during matching (avoids 640 KB static array).
+static String enrolledLabels[MAX_TASKS];
+static String enrolledTexts[MAX_TASKS];
+static int    enrolledCount = 0;
 
-// Load all .raw voice samples whose tasks are marked enrolled:true in config.json.
 void enrollment_setup() {
     enrolledCount = 0;
-
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
     File f = LittleFS.open("/config.json", "r");
-    if (!f) return;
-    DynamicJsonDocument doc(4096);
+    if (!f) { xSemaphoreGive(fsMutex); return; }
+    JsonDocument doc;
     deserializeJson(doc, f);
     f.close();
+    xSemaphoreGive(fsMutex);
 
-    JsonArray tasks = doc["tasks"].as<JsonArray>();
-    for (JsonObject task : tasks) {
+    for (JsonObject task : doc["tasks"].as<JsonArray>()) {
         if (!task["enrolled"].as<bool>()) continue;
-
-        String label = task["label"].as<String>();
-        String text  = task["text"].as<String>();
-        String path  = String("/samples/") + label + ".raw";
-
-        if (!SD.exists(path)) continue;
-        File sf = SD.open(path, FILE_READ);
-        if (!sf) continue;
-
-        sf.read((uint8_t*)enrolledSamples[enrolledCount],
-                ENROLL_SAMPLE_COUNT * sizeof(int16_t));
-        sf.close();
-
-        enrolledLabels[enrolledCount] = label;
-        enrolledTexts[enrolledCount]  = text;
-        enrolledCount++;
-
         if (enrolledCount >= MAX_TASKS) break;
+        enrolledLabels[enrolledCount] = task["label"].as<String>();
+        enrolledTexts[enrolledCount]  = task["text"].as<String>();
+        enrolledCount++;
     }
-    Serial.printf("Enrollment: %d task(s) loaded\n", enrolledCount);
+    Serial.printf("Enrollment: %d task(s) indexed\n", enrolledCount);
 }
 
-// Record one voice sample for the given label:
-//   1. Play "Say the word clearly after the beep" (MP3 0084)
-//   2. Play the beep (MP3 0085)
-//   3. Record 1 second of raw PCM audio from the I2S mic
-//   4. Save to /samples/<label>.raw on the SD card
-//   5. Mark enrolled:true in config.json and reload into RAM
 bool enrollment_record(const String& label) {
     dfPlayer.play(84);  // "Say the word clearly after the beep."
     delay(2500);
@@ -66,9 +45,10 @@ bool enrollment_record(const String& label) {
 
     int16_t buf[ENROLL_SAMPLE_COUNT];
     size_t  bytesRead = 0;
-    i2s_read(I2S_NUM_0, buf, sizeof(buf), &bytesRead, portMAX_DELAY);
+    // Use a 2-second timeout so a stuck I2S driver doesn't hang forever
+    i2s_read(I2S_NUM_0, buf, sizeof(buf), &bytesRead,
+             pdMS_TO_TICKS(2000));
 
-    // Save raw PCM to SD
     if (!SD.exists("/samples")) SD.mkdir("/samples");
     String path = String("/samples/") + label + ".raw";
     File f = SD.open(path, FILE_WRITE);
@@ -76,12 +56,11 @@ bool enrollment_record(const String& label) {
     f.write((uint8_t*)buf, sizeof(buf));
     f.close();
 
-    // Mark as enrolled in config.json
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
     File cf = LittleFS.open("/config.json", "r");
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     deserializeJson(doc, cf);
     cf.close();
-
     for (JsonObject task : doc["tasks"].as<JsonArray>()) {
         if (task["label"].as<String>() == label) {
             task["enrolled"] = true;
@@ -91,28 +70,55 @@ bool enrollment_record(const String& label) {
     File cfw = LittleFS.open("/config.json", "w");
     serializeJson(doc, cfw);
     cfw.close();
+    xSemaphoreGive(fsMutex);
 
-    enrollment_setup();    // reload updated samples into RAM
-    dfPlayer.play(86);     // "Word enrolled! You can now use it."
+    enrollment_setup();
+    dfPlayer.play(86);  // "Word enrolled! You can now use it."
     return true;
 }
 
-// Compare incoming audio against all enrolled samples using cosine similarity.
-// Returns the index of the best match if it exceeds the threshold, else -1.
+// Compare incoming audio against all enrolled SD samples using cosine similarity.
+// DC bias is removed from both signals before comparison to reduce sensitivity to
+// microphone offset and ambient volume differences.
+// Loads one 32 KB reference buffer at a time — no static large allocation.
 int enrollment_match(int16_t* audio, size_t sampleCount) {
     if (enrolledCount == 0) return -1;
 
-    const float THRESHOLD = 0.60f;  // raise to 0.70 if false accepts; lower to 0.50 if rejects
+    const float THRESHOLD = 0.60f;
     float bestScore = 0.0f;
     int   bestIdx   = -1;
 
+    // Compute DC bias of the incoming audio
+    double sumA = 0;
+    for (size_t j = 0; j < sampleCount; j++) sumA += audio[j];
+    double meanA = sumA / (double)sampleCount;
+
+    // Heap-allocate a single reference buffer reused for every enrolled sample
+    int16_t* refBuf = (int16_t*)malloc(ENROLL_SAMPLE_COUNT * sizeof(int16_t));
+    if (!refBuf) {
+        Serial.println("enrollment_match: malloc failed");
+        return -1;
+    }
+
     for (int i = 0; i < enrolledCount; i++) {
+        String path = String("/samples/") + enrolledLabels[i] + ".raw";
+        File sf = SD.open(path, FILE_READ);
+        if (!sf) continue;
+        size_t rb = sf.read((uint8_t*)refBuf, ENROLL_SAMPLE_COUNT * sizeof(int16_t));
+        sf.close();
+        if (rb < ENROLL_SAMPLE_COUNT * sizeof(int16_t)) continue;
+
+        // DC bias of reference
+        double sumB = 0;
+        for (size_t j = 0; j < ENROLL_SAMPLE_COUNT; j++) sumB += refBuf[j];
+        double meanB = sumB / (double)ENROLL_SAMPLE_COUNT;
+
+        // Cosine similarity with DC removed
         double dot = 0, normA = 0, normB = 0;
         size_t len = min(sampleCount, (size_t)ENROLL_SAMPLE_COUNT);
-
         for (size_t j = 0; j < len; j++) {
-            double a = audio[j];
-            double b = enrolledSamples[i][j];
+            double a = (double)audio[j]  - meanA;
+            double b = (double)refBuf[j] - meanB;
             dot   += a * b;
             normA += a * a;
             normB += b * b;
@@ -120,12 +126,10 @@ int enrollment_match(int16_t* audio, size_t sampleCount) {
         if (normA == 0.0 || normB == 0.0) continue;
 
         float score = (float)(dot / (sqrt(normA) * sqrt(normB)));
-        if (score > bestScore) {
-            bestScore = score;
-            bestIdx   = i;
-        }
+        if (score > bestScore) { bestScore = score; bestIdx = i; }
     }
 
+    free(refBuf);
     return (bestScore >= THRESHOLD) ? bestIdx : -1;
 }
 

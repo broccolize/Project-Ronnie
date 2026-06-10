@@ -10,6 +10,7 @@ struct AppConfig {
   String ttsKey;          // V4-6: ElevenLabs API key
   long   timezoneOffset;
   int    volume;
+  String portalPin;       // optional token; if set, write endpoints require X-Ronnie-Pin header
 };
 
 extern AppConfig appConfig;
