@@ -3,8 +3,8 @@
 #include "voice.h"
 #include "commands.h"
 #include "face.h"
-#include "enrollment.h"   // V4-2: cosine-similarity task matching
-#include "reminder.h"     // V4-1: reminder_add_voice()
+#include "enrollment.h"
+#include "reminder.h"
 #include <DFRobotDFPlayerMini.h>
 
 extern DFRobotDFPlayerMini dfPlayer;
@@ -15,19 +15,13 @@ extern RTC_DS3231           rtc;
 #define I2S_SD            33
 #define AUDIO_BUFFER_SIZE 16000
 
-// Heap-allocated to avoid a 32 KB stack overflow
-static int16_t*      audioBuffer  = NULL;
-static bool          awake        = false;
-static unsigned long awakeUntil   = 0;
-static unsigned long lastVoiceRun = 0;
+// Heap-allocated inference buffer
+static int16_t* audioBuffer = NULL;
+
+static bool          awake      = false;
+static unsigned long awakeUntil = 0;
 
 // ── V4-1: VOICE STATE MACHINE ─────────────────────────────────────────────
-// Handles the 3-stage reminder conversation:
-//   VS_IDLE → (say "reminder") → VS_REMINDER_WAIT_HOUR
-//           → (say hour word)  → VS_REMINDER_WAIT_AMPM
-//           → (say "am"/"pm")  → VS_REMINDER_WAIT_TASK
-//           → (say task word)  → reminder saved → VS_IDLE
-
 enum VoiceState {
     VS_IDLE,
     VS_REMINDER_WAIT_HOUR,
@@ -38,7 +32,6 @@ enum VoiceState {
 static VoiceState voiceState = VS_IDLE;
 static int        pendingHour = -1;
 
-// Map Edge Impulse number keyword labels to integer hours (1–12)
 static int labelToHour(const char* label) {
     const char* nums[] = {
         "one","two","three","four","five","six",
@@ -49,8 +42,6 @@ static int labelToHour(const char* label) {
     }
     return -1;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 void voice_setup() {
     i2s_config_t cfg = {
@@ -74,69 +65,56 @@ void voice_setup() {
     };
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
-    if (err != ESP_OK) {
-        Serial.printf("I2S install failed: %d\n", err);
-        return;
-    }
+    if (err != ESP_OK) { Serial.printf("I2S install failed: %d\n", err); return; }
     err = i2s_set_pin(I2S_NUM_0, &pins);
-    if (err != ESP_OK) {
-        Serial.printf("I2S set_pin failed: %d\n", err);
-        return;
-    }
+    if (err != ESP_OK) { Serial.printf("I2S set_pin failed: %d\n", err); return; }
 
     audioBuffer = (int16_t*)malloc(AUDIO_BUFFER_SIZE * sizeof(int16_t));
-    if (!audioBuffer) {
-        Serial.println("FATAL: audio buffer malloc failed");
-    }
+    if (!audioBuffer) Serial.println("FATAL: audio buffer malloc failed");
 }
 
 void voice_loop() {
     if (!audioBuffer) return;
 
-    // Throttle to ~10 Hz to avoid 100% CPU usage
-    if (millis() - lastVoiceRun < 100) return;
-    lastVoiceRun = millis();
+    // Accumulate samples in a static buffer; only run inference once a full
+    // 1-second window (16 000 samples) has been collected.  Reading small
+    // chunks (512 samples, ~32 ms) keeps loop() responsive while ensuring the
+    // classifier always receives a complete, non-padded audio window.
+    static int16_t accumBuf[AUDIO_BUFFER_SIZE];
+    static size_t  accumPos = 0;
 
     size_t bytesRead = 0;
-    i2s_read(I2S_NUM_0, audioBuffer, AUDIO_BUFFER_SIZE * sizeof(int16_t), &bytesRead, 100);
+    size_t toRead    = min((size_t)512, AUDIO_BUFFER_SIZE - accumPos) * sizeof(int16_t);
+    i2s_read(I2S_NUM_0, accumBuf + accumPos, toRead,
+             &bytesRead, pdMS_TO_TICKS(10));
+    accumPos += bytesRead / sizeof(int16_t);
 
-    // Pad with silence if DMA returned a short read
-    size_t samplesRead = bytesRead / sizeof(int16_t);
-    if (samplesRead < AUDIO_BUFFER_SIZE) {
-        memset(audioBuffer + samplesRead, 0,
-               (AUDIO_BUFFER_SIZE - samplesRead) * sizeof(int16_t));
-    }
+    if (accumPos < AUDIO_BUFFER_SIZE) return;  // not a full window yet
 
-    // ── V4-1: TASK STAGE — use enrollment matcher, NOT Edge Impulse ─────────
-    // During VS_REMINDER_WAIT_TASK we compare raw audio against SD samples.
+    memcpy(audioBuffer, accumBuf, AUDIO_BUFFER_SIZE * sizeof(int16_t));
+    accumPos = 0;
+
+    // ── V4-1: TASK STAGE — enrollment matcher, not Edge Impulse ─────────────
     if (voiceState == VS_REMINDER_WAIT_TASK) {
         if (!awake || millis() > awakeUntil) {
-            // Timed out waiting for task word
-            voiceState = VS_IDLE;
-            awake      = false;
+            voiceState  = VS_IDLE;
+            awake       = false;
             pendingHour = -1;
-            dfPlayer.play(99);  // "Sorry, I didn't catch that"
+            dfPlayer.play(99);
             return;
         }
-
         int matchIdx = enrollment_match(audioBuffer, AUDIO_BUFFER_SIZE);
-        if (matchIdx < 0) return;  // no match yet — keep listening
+        if (matchIdx < 0) return;
 
         String taskText = enrollment_getMatchedText(matchIdx);
-
-        // Build and save the voice-set reminder
-        Reminder r = {};
+        Reminder r      = {};
         r.hour   = pendingHour;
         r.minute = 0;
-        r.day    = 0;
-        r.month  = 0;
-        r.year   = 0;
         r.mp3    = 10;
         strlcpy(r.text, taskText.c_str(), sizeof(r.text));
-
         reminder_add_voice(r);
 
-        dfPlayer.play(20);   // "Got it! Alarm set."
+        dfPlayer.play(20);
         drawFace(HAPPY);
         voiceState  = VS_IDLE;
         pendingHour = -1;
@@ -144,7 +122,7 @@ void voice_loop() {
         return;
     }
 
-    // ── RUN EDGE IMPULSE on all other states ─────────────────────────────────
+    // ── RUN EDGE IMPULSE ─────────────────────────────────────────────────────
     signal_t            signal;
     ei_impulse_result_t result;
     numpy::signal_from_buffer(audioBuffer, AUDIO_BUFFER_SIZE, &signal);
@@ -167,62 +145,46 @@ void voice_loop() {
 
     const char* label = ei_classifier_inferencing_categories[bestIdx];
 
-    // ── WAKE WORD ─────────────────────────────────────────────────────────────
     if (strcmp(label, "hey_ronnie") == 0) {
         awake      = true;
         awakeUntil = millis() + 5000;
-        voiceState = VS_IDLE;  // reset any pending state on new wake
+        voiceState = VS_IDLE;
         drawFace(HAPPY);
-        dfPlayer.play(68);     // "Yes, sorry I kinda passed out"
+        dfPlayer.play(68);
         return;
     }
 
-    if (!awake || millis() > awakeUntil) {
-        awake = false;
-        return;
-    }
+    if (!awake || millis() > awakeUntil) { awake = false; return; }
 
     // ── V4-1: REMINDER STATE MACHINE ─────────────────────────────────────────
-
-    // Stage 1 — waiting for hour word (one … twelve)
     if (voiceState == VS_REMINDER_WAIT_HOUR) {
         int h = labelToHour(label);
-        if (h < 0) {
-            dfPlayer.play(99);    // unrecognised — cancel flow
-            voiceState = VS_IDLE;
-            awake      = false;
-            return;
-        }
+        if (h < 0) { dfPlayer.play(99); voiceState = VS_IDLE; awake = false; return; }
         pendingHour = h;
         voiceState  = VS_REMINDER_WAIT_AMPM;
-        dfPlayer.play(81);        // "AM or PM?"
+        dfPlayer.play(81);
         awakeUntil = millis() + 8000;
         return;
     }
 
-    // Stage 2 — waiting for "am" or "pm"
     if (voiceState == VS_REMINDER_WAIT_AMPM) {
         if (strcmp(label, "pm") == 0 && pendingHour < 12) pendingHour += 12;
-        if (strcmp(label, "am") == 0 && pendingHour == 12) pendingHour  = 0;
+        if (strcmp(label, "am") == 0 && pendingHour == 12) pendingHour = 0;
         voiceState = VS_REMINDER_WAIT_TASK;
-        dfPlayer.play(82);        // "What should I remind you about?"
+        dfPlayer.play(82);
         awakeUntil = millis() + 8000;
-        awake      = true;        // stay listening for task word
+        awake      = true;
         return;
     }
 
     // ── NORMAL COMMANDS (VS_IDLE) ─────────────────────────────────────────────
-
-    // "reminder" command now starts the 3-stage voice flow instead of
-    // redirecting to the web portal (portal path still works via webserver.cpp).
     if (strcmp(label, "reminder") == 0) {
         voiceState = VS_REMINDER_WAIT_HOUR;
-        dfPlayer.play(80);        // "At what hour?"
+        dfPlayer.play(80);
         awakeUntil = millis() + 8000;
         return;
     }
 
-    // All other commands — dispatch normally
     awake = false;
     handleCommand(label, "");
 }

@@ -5,9 +5,9 @@
 #include <RTClib.h>
 #include <ArduinoJson.h>
 #include <DFRobotDFPlayerMini.h>
-#include <HTTPClient.h>         // V4-7: needed for autoDetectCity()
-#include <WiFiClientSecure.h>   // V4-7: needed for autoDetectCity()
-#include "config.h"     // AppConfig struct + extern appConfig
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include "config.h"
 #include "face.h"
 #include "voice.h"
 #include "commands.h"
@@ -15,10 +15,10 @@
 #include "reminder.h"
 #include "battery.h"
 #include "webserver.h"
-#include "enrollment.h" // V4-2: voice task enrollment
-#include "tts.h"        // V4-6: ElevenLabs TTS
+#include "enrollment.h"
+#include "tts.h"
+#include "timer.h"
 
-// dfPlayer declared here; extern in headers that need it
 HardwareSerial dfSerial(2);
 DFRobotDFPlayerMini dfPlayer;
 
@@ -29,35 +29,47 @@ RTC_DS3231 rtc;
 
 bool wifiConnected = false;
 
-// AppConfig struct lives in headers/config.h.
-// Storage (definition) stays here; every other module uses the extern.
 AppConfig appConfig;
 
-// V4-2: Enrollment request flags — set by /enroll web endpoint, consumed in loop()
+// Mutex protecting all LittleFS access between loop() (Core 1) and the
+// ESPAsyncWebServer task (Core 0).  Initialised in setup() before any task
+// or webserver code can run.
+SemaphoreHandle_t fsMutex = NULL;
+
+// V4-2: Enrollment flags — set by /enroll endpoint, consumed in loop()
 String pendingEnrollLabel = "";
 bool   enrollRequested    = false;
 
-// Guard: setupWebServer() / server.begin() must only be called once.
 bool serverStarted = false;
 
+// Config button: hold GPIO 4 for 3 s to enter web config
+#define CONFIG_BUTTON_PIN 4
+static unsigned long configBtnPressTime = 0;
+
+// Good-Morning weather scheduler
+unsigned long gmWeatherScheduledAt = 0;
+
 void loadConfig() {
-    appConfig = { "London", "", "", 0, 25 };  // safe defaults (city, owmKey, ttsKey, tz, volume)
-    if (!LittleFS.exists("/config.json")) return;
+    appConfig = { "London", "", "", 0, 25, "" };
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
+    bool exists = LittleFS.exists("/config.json");
+    if (!exists) { xSemaphoreGive(fsMutex); return; }
     File f = LittleFS.open("/config.json", "r");
-    if (!f) return;
-    DynamicJsonDocument doc(2048);  // increased from 512 to hold tasks array (V4-2)
+    if (!f)      { xSemaphoreGive(fsMutex); return; }
+    JsonDocument doc;
     if (!deserializeJson(doc, f)) {
         appConfig.city           = doc["city"]            | "London";
         appConfig.owmKey         = doc["owm_key"]         | "";
-        appConfig.ttsKey         = doc["tts_key"]         | "";  // V4-6
+        appConfig.ttsKey         = doc["tts_key"]         | "";
         appConfig.timezoneOffset = doc["timezone_offset"] | 0L;
         appConfig.volume         = doc["volume"]          | 25;
+        appConfig.portalPin      = doc["portal_pin"]      | "";
     }
     f.close();
+    xSemaphoreGive(fsMutex);
 }
 
-// V4-7: Auto geolocation via ip-api.com — called once after WiFi connects.
-// Detects city from the device's public IP and saves it to config.json.
+// Auto geolocation via ip-api.com — called once after WiFi connects.
 void autoDetectCity() {
     HTTPClient http;
     http.begin("http://ip-api.com/json");
@@ -65,24 +77,27 @@ void autoDetectCity() {
     int code = http.GET();
     if (code != 200) { http.end(); return; }
 
-    DynamicJsonDocument doc(512);
-    deserializeJson(doc, http.getStream());
+    JsonDocument geo;
+    deserializeJson(geo, http.getStream());
     http.end();
 
-    String city    = doc["city"]    | "";
-    String country = doc["country"] | "";
+    String city    = geo["city"]    | "";
+    String country = geo["country"] | "";
     if (city.isEmpty()) return;
 
-    // Read existing config, update city + country, write back
-    File rf = LittleFS.open("/config.json", "r");
-    DynamicJsonDocument cfg(2048);
-    deserializeJson(cfg, rf);
-    rf.close();
+    // Read existing config, patch city + country, write back
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
+    JsonDocument cfg;
+    if (LittleFS.exists("/config.json")) {
+        File rf = LittleFS.open("/config.json", "r");
+        if (rf) { deserializeJson(cfg, rf); rf.close(); }
+    }
     cfg["city"]    = city;
     cfg["country"] = country;
     File wf = LittleFS.open("/config.json", "w");
     serializeJson(cfg, wf);
     wf.close();
+    xSemaphoreGive(fsMutex);
 
     appConfig.city = city;
     Serial.printf("Auto-detected city: %s, %s\n", city.c_str(), country.c_str());
@@ -90,15 +105,11 @@ void autoDetectCity() {
     delay(2000);
 }
 
-// Config button: hold GPIO 4 for 3 s to enter web config
-#define CONFIG_BUTTON_PIN 4
-static unsigned long configBtnPressTime = 0;
-
-// Good-Morning weather scheduler (millis-based, non-blocking)
-unsigned long gmWeatherScheduledAt = 0;
-
 void setup() {
     Serial.begin(115200);
+
+    // Create the LittleFS mutex before any task that touches the filesystem
+    fsMutex = xSemaphoreCreateMutex();
 
     if (!LittleFS.begin(true)) {
         Serial.println("LittleFS mount failed — formatting");
@@ -131,7 +142,7 @@ void setup() {
     wifiConnected = wm.autoConnect("Ronnie-Setup");
 
     if (wifiConnected) {
-        autoDetectCity();  // V4-7 — detect city from WiFi IP before NTP
+        autoDetectCity();
         timeClient.begin();
         if (timeClient.update()) {
             rtc.adjust(DateTime(timeClient.getEpochTime()));
@@ -146,8 +157,9 @@ void setup() {
     alarm_setup();
     reminder_setup();
     battery_setup();
-    enrollment_setup();  // V4-2 — load enrolled voice samples from SD
-    tts_setup();         // V4-6 — prepare SD TTS cache directory
+    enrollment_setup();
+    tts_setup();
+    timer_setup();
 
     drawFace(IDLE);
     dfPlayer.play(1);
@@ -155,9 +167,11 @@ void setup() {
 
 void loop() {
     voice_loop();
-    reminder_tick();  // fires delayed reminder MP3 when its timer expires
+    reminder_tick();
+    alarm_ring_tick();
+    timer_loop();
 
-    // V4-2: Handle voice enrollment triggered from web portal /enroll endpoint
+    // V4-2: Voice enrollment
     if (enrollRequested) {
         enrollRequested = false;
         drawFace(THINKING);
@@ -165,7 +179,7 @@ void loop() {
         drawFace(IDLE);
     }
 
-    // Trigger weather after Good Morning greeting has finished playing
+    // Trigger weather after Good Morning greeting
     if (gmWeatherScheduledAt > 0 && millis() > gmWeatherScheduledAt) {
         gmWeatherScheduledAt = 0;
         handleCommand("weather", "");
@@ -179,6 +193,13 @@ void loop() {
         alarm_check(now);
         reminder_check(now);
         battery_auto_warn();
+
+        // Refresh smart idle status bar
+        int h   = now.hour();
+        bool pm = (h >= 12);
+        if (h > 12) h -= 12;
+        if (h == 0) h = 12;
+        face_set_status(h, now.minute(), pm, battery_percent());
     }
 
     // WiFi reconnection watchdog
@@ -210,7 +231,6 @@ void loop() {
                 setupWebServer();
                 serverStarted = true;
             } else {
-                // Server already running — just re-display the IP
                 String ip = WiFi.localIP().toString();
                 showText("Config Mode", ip.c_str(), "in browser");
             }

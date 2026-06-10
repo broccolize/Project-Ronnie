@@ -5,6 +5,7 @@
 #include "face.h"
 
 extern DFRobotDFPlayerMini dfPlayer;
+extern SemaphoreHandle_t   fsMutex;  // defined in project_ronnie.ino
 
 #define TOUCH_PIN  34
 #define MAX_ALARMS 5
@@ -19,30 +20,39 @@ struct Alarm {
 Alarm alarms[MAX_ALARMS];
 int   alarmCount = 0;
 
-// Persist the full alarm list (including triggeredToday flags) to disk
+// ── Non-blocking ring state ──────────────────────────────────────────────────
+static bool          alarmRinging   = false;
+static unsigned long ringingStart   = 0;
+static int           tapCount_      = 0;
+static unsigned long firstTapTime_  = 0;
+static bool          touchHeld_     = false;
+
 void alarm_save_triggered() {
-    DynamicJsonDocument doc(512);
-    JsonArray arr = doc.createNestedArray("alarms");
+    JsonDocument doc;
+    JsonArray arr = doc["alarms"].to<JsonArray>();
     for (int i = 0; i < alarmCount; i++) {
-        JsonObject a = arr.createNestedObject();
+        JsonObject a   = arr.add<JsonObject>();
         a["h"]         = alarms[i].hour;
         a["m"]         = alarms[i].minute;
         a["triggered"] = alarms[i].triggeredToday;
     }
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
     File f = LittleFS.open("/alarms.json", "w");
     serializeJson(doc, f);
     f.close();
+    xSemaphoreGive(fsMutex);
 }
 
-// Load alarms from disk into the in-memory array.
-// Called by both alarm_setup() and alarm_reload().
 void alarm_reload() {
-    alarmCount = 0;  // clear existing in-memory state
-    if (!LittleFS.exists("/alarms.json")) return;
+    alarmCount = 0;
+    xSemaphoreTake(fsMutex, portMAX_DELAY);
+    bool exists = LittleFS.exists("/alarms.json");
+    if (!exists) { xSemaphoreGive(fsMutex); return; }
     File f = LittleFS.open("/alarms.json", "r");
-    DynamicJsonDocument doc(512);
+    JsonDocument doc;
     deserializeJson(doc, f);
     f.close();
+    xSemaphoreGive(fsMutex);
     for (JsonObject a : doc["alarms"].as<JsonArray>()) {
         if (alarmCount < MAX_ALARMS) {
             alarms[alarmCount++] = { a["h"], a["m"], true, (bool)(a["triggered"] | false) };
@@ -51,8 +61,8 @@ void alarm_reload() {
 }
 
 void alarm_setup() {
-    pinMode(TOUCH_PIN, INPUT);  // hardware init — only called once at boot
-    alarm_reload();             // load persisted alarms from disk
+    pinMode(TOUCH_PIN, INPUT);
+    alarm_reload();
 }
 
 void alarm_set(int hour, int minute) {
@@ -66,12 +76,12 @@ void alarm_set(int hour, int minute) {
 }
 
 void alarm_check(DateTime now) {
+    if (alarmRinging) return;  // already ringing — let alarm_ring_tick() handle it
+
     // Reset all triggeredToday flags at midnight
     static int lastDay = -1;
     if (now.day() != lastDay) {
-        for (int i = 0; i < alarmCount; i++) {
-            alarms[i].triggeredToday = false;
-        }
+        for (int i = 0; i < alarmCount; i++) alarms[i].triggeredToday = false;
         lastDay = now.day();
         alarm_save_triggered();
     }
@@ -83,47 +93,58 @@ void alarm_check(DateTime now) {
             alarms[i].minute == now.minute() &&
             now.second() < 10) {
             alarms[i].triggeredToday = true;
-            alarm_save_triggered();  // persist before the blocking ring call
+            alarm_save_triggered();
             alarm_ring(i);
+            return;  // one alarm per tick
         }
     }
 }
 
-void alarm_ring(int idx) {
+void alarm_ring(int /*idx*/) {
+    alarmRinging  = true;
+    ringingStart  = millis();
+    tapCount_     = 0;
+    firstTapTime_ = 0;
+    touchHeld_    = false;
     dfPlayer.play(21);
-    drawFace(HAPPY);
-    showText("ALARM!", "Double-tap", "to dismiss");
-
-    // Require two taps within a 150–700 ms window to dismiss
-    int           tapCount     = 0;
-    unsigned long firstTapTime = 0;
-    unsigned long start        = millis();
-
-    while (millis() - start < 60000 && tapCount < 2) {
-        if (digitalRead(TOUCH_PIN) == HIGH) {
-            // Wait for full release before counting
-            while (digitalRead(TOUCH_PIN) == HIGH) delay(10);
-            unsigned long t = millis();
-            if (tapCount == 0) {
-                firstTapTime = t;
-                tapCount = 1;
-            } else if (t - firstTapTime > 150 && t - firstTapTime < 700) {
-                tapCount = 2;
-                break;
-            } else {
-                // Too fast or too slow — restart tap sequence
-                firstTapTime = t;
-                tapCount = 1;
-            }
-        }
-        delay(10);
-    }
-
-    dfPlayer.stop();
-    // active stays true so the alarm repeats tomorrow.
-    // triggeredToday is already set; alarm_check() clears it at midnight.
-    alarm_save_triggered();
-    drawFace(IDLE);
+    drawFace(ALARM_RING);
 }
 
-void alarm_save() { alarm_save_triggered(); }  // public alias
+// Call every loop() iteration — non-blocking double-tap poll.
+void alarm_ring_tick() {
+    if (!alarmRinging) return;
+
+    // Auto-dismiss after 60 s
+    if (millis() - ringingStart > 60000) {
+        alarmRinging = false;
+        dfPlayer.stop();
+        alarm_save_triggered();
+        drawFace(IDLE);
+        return;
+    }
+
+    bool pinHigh = (digitalRead(TOUCH_PIN) == HIGH);
+
+    if (pinHigh && !touchHeld_) {
+        touchHeld_ = true;  // finger down — wait for release to count
+    } else if (!pinHigh && touchHeld_) {
+        touchHeld_ = false;  // finger released — count the tap
+        unsigned long t = millis();
+        if (tapCount_ == 0) {
+            firstTapTime_ = t;
+            tapCount_     = 1;
+        } else if (t - firstTapTime_ > 150 && t - firstTapTime_ < 700) {
+            // Valid double-tap within window
+            alarmRinging = false;
+            dfPlayer.stop();
+            alarm_save_triggered();
+            drawFace(IDLE);
+        } else {
+            // Too fast or too slow — restart sequence
+            firstTapTime_ = t;
+            tapCount_     = 1;
+        }
+    }
+}
+
+void alarm_save() { alarm_save_triggered(); }
