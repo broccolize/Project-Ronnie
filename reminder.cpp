@@ -8,16 +8,7 @@ extern DFRobotDFPlayerMini dfPlayer;
 
 #define MAX_REMINDERS 10
 
-struct Reminder {
-    int  hour;
-    int  minute;
-    int  day;
-    int  month;
-    int  year;
-    char text[64];
-    int  mp3;
-    bool triggered;
-};
+// Reminder struct is declared in reminder.h — do not redefine here.
 
 Reminder reminders[MAX_REMINDERS];
 int      reminderCount = 0;
@@ -113,4 +104,16 @@ void reminder_check(DateTime now) {
             drawFace(SPEAKING);
         }
     }
+}
+
+// V4-1: Save a reminder created entirely by voice command at runtime.
+// Called from voice.cpp after the 3-stage listening flow completes.
+void reminder_add_voice(Reminder r) {
+    if (reminderCount >= MAX_REMINDERS) {
+        dfPlayer.play(99);  // "Sorry, I didn't catch that" — max reached
+        return;
+    }
+    r.triggered = false;
+    reminders[reminderCount++] = r;
+    reminder_save_triggered();  // persist to LittleFS immediately
 }

@@ -5,6 +5,7 @@
 #include "alarm.h"
 #include "reminder.h"
 #include "battery.h"
+#include "tts.h"        // V4-6: ElevenLabs TTS for time and date
 #include <DFRobotDFPlayerMini.h>
 
 // All externs are declared via commands.h — no duplicates needed here.
@@ -47,23 +48,29 @@ void handleCommand(const char* label, const String& rawSpeech) {
     Serial.printf("Command: %s\n", label);
 
     if (strcmp(label, "time") == 0) {
-        String t = getFormattedTime();
+        // V4-6: Speak the actual current time via TTS (falls back to static MP3 if unavailable)
+        String t = getFormattedTime();  // e.g. "7:30 AM"
         showText("The Time Is", t.c_str(), NULL);
-        dfPlayer.play(2);
-        drawFace(SPEAKING);
+        String key = "time_" + t;
+        key.replace(":", ""); key.replace(" ", ""); key.toLowerCase();  // e.g. "time_730am"
+        tts_speak("The time is " + t, key);
 
     } else if (strcmp(label, "date") == 0) {
-        String d = getFormattedDate();
+        // V4-6: Speak the actual current date via TTS
+        String d = getFormattedDate();  // e.g. "18 May 2026"
         showText("Today's Date", d.c_str(), NULL);
-        dfPlayer.play(3);
-        drawFace(SPEAKING);
+        String key = "date_" + d;
+        key.replace(" ", ""); key.toLowerCase();  // e.g. "date_18may2026"
+        tts_speak("Today is " + d, key);
 
     } else if (strcmp(label, "time_and_date") == 0) {
+        // V4-6: Speak combined time and date via TTS
         String t = getFormattedTime();
         String d = getFormattedDate();
         showText(d.c_str(), t.c_str(), NULL);
-        dfPlayer.play(30);
-        drawFace(SPEAKING);
+        String key = "combined_" + d + t;
+        key.replace(" ", ""); key.replace(":", ""); key.toLowerCase();
+        tts_speak("Today is " + d + ", and the time is " + t, key);
 
     } else if (strcmp(label, "weather") == 0) {
         if (!wifiConnected) {
