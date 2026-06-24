@@ -25,10 +25,9 @@ function loadInitialState() {
         try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), 'utf8')); }
         catch { return fallback; }
     };
-    config    = read('config.json',    { city:'London', country:'', timezone_offset:0, owm_key:'', tts_key:'', volume:25, tasks:[] });
+    config    = read('config.json',    { city:'London', country:'UK', timezone_offset:0, owm_key:'', tts_key:'', whisper_url:'', volume:25 });
     alarms    = read('alarms.json',    { alarms: [] });
     reminders = read('reminders.json', { reminders: [] });
-    if (!config.tasks) config.tasks = [];
 }
 
 loadInitialState();
@@ -89,8 +88,7 @@ const server = http.createServer(async (req, res) => {
     if (url === '/config' && method === 'POST') {
         const incoming = JSON.parse(await readBody(req));
         Object.assign(config, incoming);
-        if (!config.tasks) config.tasks = [];  // never clobber tasks
-        log(method, url, `city="${config.city}" tts_key=${config.tts_key ? '[set]' : '[empty]'}`);
+        log(method, url, `city="${config.city}" whisper=${config.whisper_url ? '[set]' : '[empty]'} tts_key=${config.tts_key ? '[set]' : '[empty]'}`);
         text(res, 'Config saved. Restart Ronnie.');
         return;
     }
@@ -121,57 +119,8 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // ── /tasks ────────────────────────────────────────────────────────────
-    if (url === '/tasks' && method === 'GET') {
-        log(method, url, `${config.tasks.length} task(s)`);
-        json(res, config.tasks);
-        return;
-    }
-    if (url === '/tasks' && method === 'POST') {
-        const { label, text: taskText, mp3 } = JSON.parse(await readBody(req));
-        if (!label || !taskText) { text(res, 'Missing label or text', 400); return; }
-        if (config.tasks.find(t => t.label === label)) {
-            text(res, `Task "${label}" already exists`, 400); return;
-        }
-        config.tasks.push({ label, text: taskText, mp3: mp3 || 10, enrolled: false });
-        log(method, url, `added task "${label}" → "${taskText}"`);
-        text(res, 'Task saved. Now enroll a voice sample.');
-        return;
-    }
-
-    // ── /tasks/delete ─────────────────────────────────────────────────────
-    if (url === '/tasks/delete' && method === 'POST') {
-        const { label } = JSON.parse(await readBody(req));
-        const before = config.tasks.length;
-        config.tasks = config.tasks.filter(t => t.label !== label);
-        log(method, url, `deleted "${label}" (${before} → ${config.tasks.length} tasks)`);
-        text(res, 'Deleted');
-        return;
-    }
-
-    // ── /enroll ───────────────────────────────────────────────────────────
-    if (url === '/enroll' && method === 'POST') {
-        const { label } = JSON.parse(await readBody(req));
-        log(method, url, `starting enrollment for "${label}"`);
-        console.log(`\n  \x1b[35m🎙  ENROLL\x1b[0m  Simulating recording for word \x1b[1m"${label}"\x1b[0m`);
-        console.log(`             [mock] Playing "Say the word clearly after the beep..."`);
-        console.log(`             [mock] Beep!`);
-        console.log(`             [mock] Recording 1 second of audio...`);
-
-        // Mark as enrolled after 3 s to simulate the hardware flow
-        setTimeout(() => {
-            const task = config.tasks.find(t => t.label === label);
-            if (task) {
-                task.enrolled = true;
-                console.log(`\n  \x1b[32m✓ "${label}" enrolled!\x1b[0m  Refresh the Tasks tab to see the updated status.\n`);
-            } else {
-                console.log(`\n  \x1b[31m✗ Task "${label}" not found in task list\x1b[0m\n`);
-            }
-        }, 3000);
-
-        text(res, 'Enrollment started. Ronnie will beep — say the word now.');
-        return;
-    }
+    // (v8) /tasks and /enroll endpoints removed — voice task enrollment is gone.
+    // Reminders are set by voice (single utterance) or via the /reminders portal.
 
     // ── 404 ───────────────────────────────────────────────────────────────
     log(method, url, '\x1b[31m404\x1b[0m');
@@ -187,9 +136,7 @@ server.listen(PORT, () => {
     [
         'GET  /', 'GET  /config', 'POST /config',
         'GET  /alarms', 'POST /alarms',
-        'GET  /reminders', 'POST /reminders',
-        'GET  /tasks', 'POST /tasks',
-        'POST /tasks/delete', 'POST /enroll'
+        'GET  /reminders', 'POST /reminders'
     ].forEach(e => console.log('    ' + e));
     console.log('\n  Open the URL in your browser. All changes are in-memory only.');
     console.log('─'.repeat(40) + '\n');

@@ -1,454 +1,420 @@
 """
-Ronnie Unit Tests — Pure Logic
+Ronnie Unit Tests — Pure Logic (v8)
 Run: python test/test_logic.py   (from project root)
 
-Tests the critical logic from voice.cpp and enrollment.cpp without any
-hardware, compiler, or Arduino libraries. Each test mirrors the exact
-C++ behaviour so failures here mean bugs in the firmware too.
+Tests the critical logic from the v8 firmware without any hardware, compiler,
+or Arduino libraries. Each mirror below reproduces the exact C++ behaviour so a
+failure here means a bug in the firmware too.
+
+Mirrored from:
+  - commands.cpp : transcript parsers + intent routing (the v8 rewrite)
+  - voice.cpp    : 2-window wake-streak confirmation
+  - stt.cpp      : 44-byte WAV header
+  - reminder.cpp : MAX_REMINDERS guard
 """
 
 import unittest
-import math
+import struct
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Mirrors of the C++ functions under test
+# commands.cpp — text parsers
 # ─────────────────────────────────────────────────────────────────────────────
 
-# --- voice.cpp: labelToHour() ------------------------------------------------
-
-HOUR_LABELS = [
-    "one","two","three","four","five","six",
-    "seven","eight","nine","ten","eleven","twelve"
+ONES = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
 ]
+TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50}
 
-def labelToHour(label: str) -> int:
-    """Exact Python mirror of voice.cpp labelToHour()"""
-    for i, word in enumerate(HOUR_LABELS):
-        if label == word:
-            return i + 1
+
+def one_word_number(w: str) -> int:
+    """Mirror of commands.cpp oneWordNumber()."""
+    if w in ONES:
+        return ONES.index(w)
+    return TENS.get(w, -1)
+
+
+def first_digits(s: str) -> int:
+    """Mirror of commands.cpp firstDigits() — first run of digits, else -1."""
+    i, n = 0, len(s)
+    while i < n and not s[i].isdigit():
+        i += 1
+    if i >= n:
+        return -1
+    v = 0
+    while i < n and s[i].isdigit():
+        v = v * 10 + (ord(s[i]) - ord("0"))
+        i += 1
+    return v
+
+
+def words_to_number(s: str) -> int:
+    """Mirror of commands.cpp wordsToNumber() — first number, combining 'twenty five'."""
+    tokens = s.split()
+    for idx, tok in enumerate(tokens):
+        v = one_word_number(tok)
+        if v >= 0:
+            if v % 10 == 0 and v >= 20:
+                if idx + 1 < len(tokens):
+                    v2 = one_word_number(tokens[idx + 1])
+                    if 1 <= v2 <= 9:
+                        return v + v2
+            return v
     return -1
 
 
-# --- voice.cpp: AM/PM conversion logic ---------------------------------------
+def parse_number(s: str) -> int:
+    """Mirror of commands.cpp parseNumber() — digits preferred, then words."""
+    d = first_digits(s)
+    if d >= 0:
+        return d
+    return words_to_number(s)
 
-def apply_ampm(hour: int, ampm: str) -> int:
-    """Exact mirror of the am/pm conversion in voice_loop()"""
-    if ampm == "pm" and hour < 12:
+
+def parse_clock_time(s: str):
+    """Mirror of commands.cpp parseClockTime(). Returns (hour, minute, valid)."""
+    hour, minute = -1, 0
+    colon = s.find(":")
+    if colon > 0:
+        hs = colon - 1
+        while hs > 0 and s[hs - 1].isdigit():
+            hs -= 1
+        hour = int(s[hs:colon]) if s[hs:colon].isdigit() else 0
+        me = colon + 1
+        while me < len(s) and s[me].isdigit():
+            me += 1
+        minute = int(s[colon + 1:me]) if s[colon + 1:me].isdigit() else 0
+    else:
+        h = parse_number(s)
+        if h < 0:
+            return (-1, 0, False)
+        hour, minute = h, 0
+
+    pm = ("pm" in s) or ("p m" in s)
+    am = ("am" in s) or ("a m" in s)
+    if pm and hour < 12:
         hour += 12
-    if ampm == "am" and hour == 12:
+    if am and hour == 12:
         hour = 0
-    return hour
+
+    valid = (0 <= hour <= 23) and (0 <= minute <= 59)
+    return (hour, minute, valid)
 
 
-# --- voice.cpp: VoiceState machine -------------------------------------------
+def parse_timer_duration(s: str) -> int:
+    """Mirror of commands.cpp parseTimerDuration() — seconds, defaults to minutes."""
+    num = parse_number(s)
+    if num <= 0:
+        return 0
+    if "hour" in s:
+        return num * 3600
+    if "second" in s or "sec" in s:
+        return num
+    return num * 60
 
-class VoiceState:
-    IDLE                 = "VS_IDLE"
-    REMINDER_WAIT_HOUR   = "VS_REMINDER_WAIT_HOUR"
-    REMINDER_WAIT_AMPM   = "VS_REMINDER_WAIT_AMPM"
-    REMINDER_WAIT_TASK   = "VS_REMINDER_WAIT_TASK"
+
+def extract_reminder_text(orig: str) -> str:
+    """Mirror of commands.cpp extractReminderText() (operates on original case)."""
+    low = orig.lower()
+    i = low.find(" to ")
+    if i >= 0:
+        return orig[i + 4:].strip()
+    i = low.find(" about ")
+    if i >= 0:
+        return orig[i + 7:].strip()
+    return orig.strip()
 
 
-class MockDFPlayer:
-    """Records every play() call so tests can assert what audio was triggered"""
+# ─────────────────────────────────────────────────────────────────────────────
+# commands.cpp — intent routing (handleCommand)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def route_intent(transcript: str, stopwatch_running: bool = False):
+    """
+    Mirror of the v8 handleCommand() if/else chain. Returns a tuple describing
+    the action, instead of calling DFPlayer/handlers. 'error99' = play(99).
+    """
+    s = transcript.lower()
+
+    if "time" in s and "timer" not in s:
+        return ("time",)
+    elif "date" in s:
+        return ("date",)
+    elif "weather" in s:
+        return ("weather",)
+    elif "alarm" in s:
+        h, m, valid = parse_clock_time(s)
+        return ("alarm", h, m) if valid else ("error99",)
+    elif "timer" in s:
+        secs = parse_timer_duration(s)
+        return ("timer", secs) if secs > 0 else ("error99",)
+    elif "stopwatch" in s:
+        if "stop" in s and stopwatch_running:
+            return ("stopwatch_stop",)
+        return ("stopwatch_start",)
+    elif "remind" in s:
+        h, m, valid = parse_clock_time(s)
+        if not valid:
+            return ("error99",)
+        return ("reminder", h, m, extract_reminder_text(transcript))
+    elif "good morning" in s:
+        return ("good_morning",)
+    elif "hungry" in s or "battery" in s:
+        return ("battery",)
+    else:
+        return ("error99",)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# voice.cpp — wake-streak confirmation (2 consecutive positive windows)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WakeDetector:
+    """Mirror of the wakeStreak logic in voice_loop()."""
+    THRESHOLD = 0.80
+    STREAK_MIN = 2
+
     def __init__(self):
-        self.played = []
-    def play(self, track: int):
-        self.played.append(track)
-    def last(self) -> int:
-        return self.played[-1] if self.played else None
-    def reset(self):
-        self.played.clear()
+        self.streak = 0
+
+    def feed(self, label: str, score: float) -> bool:
+        """Returns True exactly when a wake fires (and resets the streak)."""
+        if label == "hey_ronnie" and score >= self.THRESHOLD:
+            self.streak += 1
+        else:
+            self.streak = 0
+            return False
+        if self.streak >= self.STREAK_MIN:
+            self.streak = 0
+            return True
+        return False
 
 
-class VoiceStateMachine:
-    """
-    Pure Python simulation of the voice state machine from voice.cpp.
-    Call feed(label) to simulate Edge Impulse returning a classification.
-    """
-    AWAKE_TIMEOUT_MS = 8000
-    CONFIDENCE_MIN   = 0.80
+# ─────────────────────────────────────────────────────────────────────────────
+# stt.cpp — WAV header
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def __init__(self, dfplayer: MockDFPlayer):
-        self.df          = dfplayer
-        self.state       = VoiceState.IDLE
-        self.pending_hour = -1
-        self.awake        = False
-        self.reminders_saved = []   # collects reminder dicts from reminder_add_voice()
-        self._timed_out   = False   # set externally to simulate awake timeout
-
-    def wake(self):
-        """Simulate 'hey_ronnie' wake word detected"""
-        self.awake       = True
-        self._timed_out  = False
-        self.state       = VoiceState.IDLE
-        self.df.play(68)
-
-    def timeout(self):
-        """Simulate the awake window expiring"""
-        self._timed_out = True
-
-    def feed(self, label: str, score: float = 0.95) -> str:
-        """
-        Feed one classified label into the machine.
-        Returns the new state name.
-        """
-        # Simulate task-stage (enrollment matcher path)
-        if self.state == VoiceState.REMINDER_WAIT_TASK:
-            if self._timed_out or not self.awake:
-                self.state = VoiceState.IDLE
-                self.awake = False
-                self.df.play(99)
-                return self.state
-            # In the real code, enrollment_match() compares audio.
-            # Here we simulate a match if label is a known task word.
-            matched_text = self._mock_enrollment_match(label)
-            if matched_text is None:
-                return self.state  # no match yet — keep listening
-            # Save reminder
-            self.reminders_saved.append({
-                'hour': self.pending_hour, 'minute': 0,
-                'text': matched_text, 'mp3': 10
-            })
-            self.df.play(20)       # "Got it! Alarm set."
-            self.state       = VoiceState.IDLE
-            self.pending_hour = -1
-            self.awake        = False
-            return self.state
-
-        # Score gate (Edge Impulse confidence threshold)
-        if score < self.CONFIDENCE_MIN:
-            return self.state
-
-        # Must be awake for any command
-        if label == "hey_ronnie":
-            self.wake()
-            return self.state
-
-        if not self.awake or self._timed_out:
-            self.awake = False
-            return self.state
-
-        # State machine stages
-        if self.state == VoiceState.REMINDER_WAIT_HOUR:
-            h = labelToHour(label)
-            if h < 0:
-                self.df.play(99)
-                self.state = VoiceState.IDLE
-                self.awake = False
-            else:
-                self.pending_hour = h
-                self.state        = VoiceState.REMINDER_WAIT_AMPM
-                self.df.play(81)  # "AM or PM?"
-            return self.state
-
-        if self.state == VoiceState.REMINDER_WAIT_AMPM:
-            self.pending_hour = apply_ampm(self.pending_hour, label)
-            self.state        = VoiceState.REMINDER_WAIT_TASK
-            self.df.play(82)  # "What should I remind you about?"
-            self.awake        = True
-            return self.state
-
-        # VS_IDLE: normal commands
-        if label == "reminder":
-            self.state = VoiceState.REMINDER_WAIT_HOUR
-            self.df.play(80)  # "At what hour?"
-            return self.state
-
-        # All other commands — dispatch (simplified mock)
-        self.awake = False
-        self.df.play({"time":2,"date":3,"weather":4,"battery":60}.get(label, 99))
-        return self.state
-
-    # Mock enrollment matcher — maps known task labels to reminder text
-    _enrolled_tasks = {
-        "pills":   "Take pills",
-        "meeting": "Team meeting",
-        "gym":     "Go to gym",
-    }
-
-    def _mock_enrollment_match(self, label: str):
-        return self._enrolled_tasks.get(label)
-
-
-# --- enrollment.cpp: cosine similarity ---------------------------------------
-
-def cosine_similarity(a: list, b: list) -> float:
-    """Exact mirror of enrollment.cpp cosine similarity calculation"""
-    dot = normA = normB = 0.0
-    length = min(len(a), len(b))
-    for i in range(length):
-        fa, fb = float(a[i]), float(b[i])
-        dot   += fa * fb
-        normA += fa * fa
-        normB += fb * fb
-    if normA == 0.0 or normB == 0.0:
-        return 0.0
-    return dot / (math.sqrt(normA) * math.sqrt(normB))
-
-THRESHOLD = 0.60  # from enrollment.cpp
-
-def enrollment_match(audio: list, enrolled_samples: list) -> int:
-    """Returns best-match index, or -1 if below threshold"""
-    best_score = 0.0
-    best_idx   = -1
-    for i, sample in enumerate(enrolled_samples):
-        score = cosine_similarity(audio, sample)
-        if score > best_score:
-            best_score = score
-            best_idx   = i
-    return best_idx if best_score >= THRESHOLD else -1
+def build_wav_header(data_len: int) -> bytes:
+    """Mirror of stt.cpp writeWavHeader(): 16 kHz, 16-bit, mono, 44 bytes."""
+    return b"".join([
+        b"RIFF",
+        struct.pack("<I", 36 + data_len),
+        b"WAVE",
+        b"fmt ",
+        struct.pack("<I", 16),
+        struct.pack("<H", 1),       # PCM
+        struct.pack("<H", 1),       # mono
+        struct.pack("<I", 16000),   # sample rate
+        struct.pack("<I", 32000),   # byte rate
+        struct.pack("<H", 2),       # block align
+        struct.pack("<H", 16),      # bits per sample
+        b"data",
+        struct.pack("<I", data_len),
+    ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test cases
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestLabelToHour(unittest.TestCase):
+class TestNumberParsing(unittest.TestCase):
 
-    def test_all_twelve_words(self):
-        expected = {"one":1,"two":2,"three":3,"four":4,"five":5,"six":6,
-                    "seven":7,"eight":8,"nine":9,"ten":10,"eleven":11,"twelve":12}
-        for word, hour in expected.items():
-            with self.subTest(word=word):
-                self.assertEqual(labelToHour(word), hour)
+    def test_digits(self):
+        self.assertEqual(parse_number("for 7 pm"), 7)
+        self.assertEqual(parse_number("set a timer for 30 minutes"), 30)
+        self.assertEqual(first_digits("no digits here"), -1)
 
-    def test_invalid_returns_minus_one(self):
-        for bad in ["zero", "thirteen", "reminder", "", "SEVEN", "7"]:
-            with self.subTest(bad=bad):
-                self.assertEqual(labelToHour(bad), -1)
+    def test_word_numbers(self):
+        self.assertEqual(words_to_number("seven"), 7)
+        self.assertEqual(words_to_number("twelve"), 12)
+        self.assertEqual(words_to_number("twenty"), 20)
 
-    def test_case_sensitive(self):
-        self.assertEqual(labelToHour("Seven"), -1)
-        self.assertEqual(labelToHour("seven"), 7)
+    def test_compound_tens(self):
+        self.assertEqual(words_to_number("twenty five"), 25)
+        self.assertEqual(words_to_number("forty seven"), 47)
+        self.assertEqual(words_to_number("fifty nine"), 59)
 
+    def test_tens_not_followed_by_one_to_nine(self):
+        self.assertEqual(words_to_number("thirty minutes"), 30)
+        self.assertEqual(words_to_number("twenty zero"), 20)  # zero is not 1..9
 
-class TestAmPmConversion(unittest.TestCase):
+    def test_digits_preferred_over_words(self):
+        self.assertEqual(parse_number("seven 9"), 9)
 
-    def test_pm_adds_12_below_noon(self):
-        self.assertEqual(apply_ampm(7,  "pm"), 19)
-        self.assertEqual(apply_ampm(1,  "pm"), 13)
-        self.assertEqual(apply_ampm(11, "pm"), 23)
-
-    def test_pm_does_not_add_to_noon(self):
-        # 12 PM = 12 (noon) — no addition
-        self.assertEqual(apply_ampm(12, "pm"), 12)
-
-    def test_am_converts_12_to_midnight(self):
-        # 12 AM = 0 (midnight)
-        self.assertEqual(apply_ampm(12, "am"), 0)
-
-    def test_am_leaves_other_hours_alone(self):
-        for h in range(1, 12):
-            with self.subTest(h=h):
-                self.assertEqual(apply_ampm(h, "am"), h)
-
-    def test_boundary_hours(self):
-        self.assertEqual(apply_ampm(1,  "pm"), 13)   # 1 PM → 13:00
-        self.assertEqual(apply_ampm(11, "pm"), 23)   # 11 PM → 23:00
+    def test_no_number(self):
+        self.assertEqual(parse_number("hello there"), -1)
 
 
-class TestVoiceStateMachine(unittest.TestCase):
+class TestClockTime(unittest.TestCase):
 
-    def setUp(self):
-        self.df  = MockDFPlayer()
-        self.sm  = VoiceStateMachine(self.df)
+    def test_hour_with_ampm(self):
+        self.assertEqual(parse_clock_time("set an alarm for 7 pm"), (19, 0, True))
+        self.assertEqual(parse_clock_time("set an alarm for 7 am"), (7, 0, True))
 
-    # ── Happy path: full 3-stage reminder flow ────────────────────────────
+    def test_colon_time(self):
+        self.assertEqual(parse_clock_time("alarm for 6:30 am"), (6, 30, True))
+        self.assertEqual(parse_clock_time("alarm for 6:30 pm"), (18, 30, True))
 
-    def test_full_reminder_flow_7pm(self):
-        self.sm.wake()
-        self.assertEqual(self.sm.feed("reminder"), VoiceState.REMINDER_WAIT_HOUR)
-        self.assertEqual(self.df.last(), 80)   # "At what hour?"
+    def test_word_hour(self):
+        self.assertEqual(parse_clock_time("set an alarm for seven pm"), (19, 0, True))
 
-        self.assertEqual(self.sm.feed("seven"), VoiceState.REMINDER_WAIT_AMPM)
-        self.assertEqual(self.df.last(), 81)   # "AM or PM?"
-        self.assertEqual(self.sm.pending_hour, 7)
+    def test_bare_hour_no_ampm(self):
+        self.assertEqual(parse_clock_time("set an alarm for 7"), (7, 0, True))
 
-        self.assertEqual(self.sm.feed("pm"), VoiceState.REMINDER_WAIT_TASK)
-        self.assertEqual(self.df.last(), 82)   # "What should I remind you about?"
-        self.assertEqual(self.sm.pending_hour, 19)  # 7 PM = 19:00
+    def test_noon_and_midnight(self):
+        self.assertEqual(parse_clock_time("alarm for 12 pm"), (12, 0, True))  # noon stays 12
+        self.assertEqual(parse_clock_time("alarm for 12 am"), (0, 0, True))   # midnight → 0
 
-        self.assertEqual(self.sm.feed("pills"), VoiceState.IDLE)
-        self.assertEqual(self.df.last(), 20)   # "Got it!"
-        self.assertEqual(len(self.sm.reminders_saved), 1)
-        r = self.sm.reminders_saved[0]
-        self.assertEqual(r['hour'], 19)
-        self.assertEqual(r['text'], "Take pills")
-
-    def test_full_reminder_flow_12am(self):
-        """12 AM should map to hour 0 (midnight)"""
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.sm.feed("twelve")
-        self.sm.feed("am")
-        self.assertEqual(self.sm.pending_hour, 0)
-        self.assertEqual(self.sm.state, VoiceState.REMINDER_WAIT_TASK)
-
-    def test_full_reminder_flow_12pm(self):
-        """12 PM should stay as 12 (noon)"""
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.sm.feed("twelve")
-        self.sm.feed("pm")
-        self.assertEqual(self.sm.pending_hour, 12)
-
-    # ── Edge cases ────────────────────────────────────────────────────────
-
-    def test_commands_ignored_before_wake(self):
-        initial_state = self.sm.state
-        self.sm.feed("time")
-        self.assertEqual(self.sm.state, initial_state)
-        self.assertEqual(len(self.df.played), 0)
-
-    def test_invalid_hour_word_cancels_flow(self):
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.sm.feed("thirteen")   # not a valid hour word
-        self.assertEqual(self.df.last(), 99)   # "Sorry, didn't catch that"
-        self.assertEqual(self.sm.state, VoiceState.IDLE)
-
-    def test_timeout_during_task_stage_cancels(self):
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.sm.feed("three")
-        self.sm.feed("pm")
-        self.assertEqual(self.sm.state, VoiceState.REMINDER_WAIT_TASK)
-        self.sm.timeout()     # simulate awake window expiring
-        self.sm.feed("pills") # comes in after timeout
-        self.assertEqual(self.df.last(), 99)
-        self.assertEqual(self.sm.state, VoiceState.IDLE)
-        self.assertEqual(len(self.sm.reminders_saved), 0)
-
-    def test_unknown_task_word_keeps_listening(self):
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.sm.feed("five")
-        self.sm.feed("am")
-        # "dentist" is not enrolled
-        state_before = self.sm.state
-        self.sm.feed("dentist")
-        self.assertEqual(self.sm.state, state_before)   # still waiting
-        self.assertEqual(len(self.sm.reminders_saved), 0)
-
-    def test_wake_word_resets_state(self):
-        """A new wake word while mid-flow resets state to IDLE"""
-        self.sm.wake()
-        self.sm.feed("reminder")
-        self.assertEqual(self.sm.state, VoiceState.REMINDER_WAIT_HOUR)
-        self.sm.feed("hey_ronnie")   # new wake
-        self.assertEqual(self.sm.state, VoiceState.IDLE)
-
-    def test_low_confidence_ignored(self):
-        self.sm.wake()
-        self.sm.feed("time", score=0.50)   # below 0.80 threshold
-        self.assertEqual(self.sm.awake, True)
-        # awake should remain, no command dispatched
-        self.assertEqual(self.df.last(), 68)   # only the wake play, nothing else
-
-    def test_normal_commands_dispatch(self):
-        self.sm.wake()
-        self.sm.feed("time")
-        self.assertFalse(self.sm.awake)   # awake consumed
-
-    def test_multiple_reminders(self):
-        for task in [("seven","pm","pills"), ("eight","am","gym")]:
-            self.df.reset()
-            self.sm.wake()
-            self.sm.feed("reminder")
-            self.sm.feed(task[0])
-            self.sm.feed(task[1])
-            self.sm.feed(task[2])
-        self.assertEqual(len(self.sm.reminders_saved), 2)
+    def test_no_time_is_invalid(self):
+        self.assertEqual(parse_clock_time("set an alarm"), (-1, 0, False))
 
 
-class TestCosineSimilarity(unittest.TestCase):
+class TestTimerDuration(unittest.TestCase):
 
-    def test_identical_signals_score_1(self):
-        sig = [100, -200, 350, 0, 150] * 100
-        score = cosine_similarity(sig, sig)
-        self.assertAlmostEqual(score, 1.0, places=5)
+    def test_minutes_default(self):
+        self.assertEqual(parse_timer_duration("set a timer for five minutes"), 300)
+        self.assertEqual(parse_timer_duration("timer for 10 minutes"), 600)
 
-    def test_opposite_signals_score_minus_1(self):
-        sig  = [100, 200, 300]
-        neg  = [-100, -200, -300]
-        score = cosine_similarity(sig, neg)
-        self.assertAlmostEqual(score, -1.0, places=5)
+    def test_hours(self):
+        self.assertEqual(parse_timer_duration("set a timer for two hours"), 7200)
 
-    def test_orthogonal_signals_score_0(self):
-        a = [1, 0, 0]
-        b = [0, 1, 0]
-        score = cosine_similarity(a, b)
-        self.assertAlmostEqual(score, 0.0, places=5)
+    def test_seconds(self):
+        self.assertEqual(parse_timer_duration("timer for 30 seconds"), 30)
 
-    def test_zero_vector_returns_0(self):
-        self.assertEqual(cosine_similarity([0, 0, 0], [1, 2, 3]), 0.0)
+    def test_no_unit_defaults_to_minutes(self):
+        self.assertEqual(parse_timer_duration("timer for 5"), 300)
 
-    def test_slightly_different_signals_above_threshold(self):
-        base  = [1000] * 16000
-        noisy = [1000 + (i % 3 - 1) * 5 for i in range(16000)]  # ±5 noise
-        score = cosine_similarity(base, noisy)
-        self.assertGreater(score, THRESHOLD)
-
-    def test_completely_different_signals_below_threshold(self):
-        import random
-        random.seed(42)
-        a = [random.randint(-1000, 1000) for _ in range(1000)]
-        b = [random.randint(-1000, 1000) for _ in range(1000)]
-        score = cosine_similarity(a, b)
-        # Random signals have very low cosine similarity
-        self.assertLess(abs(score), 0.20)
+    def test_missing_duration_is_zero(self):
+        self.assertEqual(parse_timer_duration("set a timer"), 0)
 
 
-class TestEnrollmentMatch(unittest.TestCase):
+class TestReminderText(unittest.TestCase):
 
-    # Create simple synthetic "voice samples" for testing
-    PILLS_SAMPLE   = [500]  * 16000
-    MEETING_SAMPLE = [-500] * 16000
-    GYM_SAMPLE     = [200, -200] * 8000
+    def test_text_after_to(self):
+        self.assertEqual(
+            extract_reminder_text("remind me at 7 PM to take my pills"),
+            "take my pills",
+        )
 
-    enrolled = [PILLS_SAMPLE, MEETING_SAMPLE, GYM_SAMPLE]
+    def test_text_after_about(self):
+        self.assertEqual(
+            extract_reminder_text("remind me at 8 am about the meeting"),
+            "the meeting",
+        )
 
-    def test_exact_match_returns_correct_index(self):
-        self.assertEqual(enrollment_match(self.PILLS_SAMPLE,   self.enrolled), 0)
-        self.assertEqual(enrollment_match(self.MEETING_SAMPLE, self.enrolled), 1)
-        self.assertEqual(enrollment_match(self.GYM_SAMPLE,     self.enrolled), 2)
+    def test_fallback_to_whole_string(self):
+        self.assertEqual(extract_reminder_text("remind me later"), "remind me later")
 
-    def test_no_enrolled_samples_returns_minus_one(self):
-        self.assertEqual(enrollment_match(self.PILLS_SAMPLE, []), -1)
 
-    def test_silence_returns_minus_one(self):
-        silence = [0] * 16000
-        self.assertEqual(enrollment_match(silence, self.enrolled), -1)
+class TestIntentRouting(unittest.TestCase):
 
-    def test_completely_different_audio_below_threshold(self):
-        import random
-        random.seed(99)
-        random_audio = [random.randint(-32768, 32767) for _ in range(16000)]
-        # Matching against constant-signal enrolled samples should be near 0
-        result = enrollment_match(random_audio, self.enrolled)
-        # Either -1 (no match) or very low score — check it's not falsely matched
-        if result != -1:
-            score = cosine_similarity(random_audio, self.enrolled[result])
-            self.assertGreater(score, THRESHOLD)  # if matched, must be valid
+    def test_time_not_timer(self):
+        self.assertEqual(route_intent("what's the time"), ("time",))
+        self.assertEqual(route_intent("set a timer for 5 minutes"), ("timer", 300))
 
-    def test_near_match_pill_sample_still_matches(self):
-        noisy = [500 + (i % 5 - 2) * 10 for i in range(16000)]  # ±20 variation
-        self.assertEqual(enrollment_match(noisy, self.enrolled), 0)
+    def test_date(self):
+        self.assertEqual(route_intent("what's the date"), ("date",))
+
+    def test_weather(self):
+        self.assertEqual(route_intent("how's the weather"), ("weather",))
+
+    def test_alarm(self):
+        self.assertEqual(route_intent("set an alarm for 7 pm"), ("alarm", 19, 0))
+
+    def test_alarm_without_time_errors(self):
+        self.assertEqual(route_intent("set an alarm"), ("error99",))
+
+    def test_stopwatch_start_and_stop(self):
+        self.assertEqual(route_intent("start the stopwatch"), ("stopwatch_start",))
+        self.assertEqual(
+            route_intent("stop the stopwatch", stopwatch_running=True),
+            ("stopwatch_stop",),
+        )
+        # "stop" but not running → start (mirrors the C++ guard)
+        self.assertEqual(
+            route_intent("stop the stopwatch", stopwatch_running=False),
+            ("stopwatch_start",),
+        )
+
+    def test_reminder(self):
+        self.assertEqual(
+            route_intent("remind me at 7 pm to take my pills"),
+            ("reminder", 19, 0, "take my pills"),
+        )
+
+    def test_reminder_without_time_errors(self):
+        self.assertEqual(route_intent("remind me to do stuff"), ("error99",))
+
+    def test_good_morning(self):
+        self.assertEqual(route_intent("good morning"), ("good_morning",))
+
+    def test_battery(self):
+        self.assertEqual(route_intent("are you hungry"), ("battery",))
+        self.assertEqual(route_intent("what's the battery level"), ("battery",))
+
+    def test_unknown(self):
+        self.assertEqual(route_intent("tell me a joke"), ("error99",))
+
+
+class TestWakeDetector(unittest.TestCase):
+
+    def test_requires_two_consecutive_windows(self):
+        wd = WakeDetector()
+        self.assertFalse(wd.feed("hey_ronnie", 0.95))  # 1st window — no fire
+        self.assertTrue(wd.feed("hey_ronnie", 0.95))   # 2nd window — fires
+
+    def test_streak_resets_on_miss(self):
+        wd = WakeDetector()
+        self.assertFalse(wd.feed("hey_ronnie", 0.95))
+        self.assertFalse(wd.feed("noise", 0.99))        # resets the streak
+        self.assertFalse(wd.feed("hey_ronnie", 0.95))   # back to 1
+        self.assertTrue(wd.feed("hey_ronnie", 0.95))    # now 2 → fires
+
+    def test_below_threshold_does_not_count(self):
+        wd = WakeDetector()
+        self.assertFalse(wd.feed("hey_ronnie", 0.50))
+        self.assertFalse(wd.feed("hey_ronnie", 0.79))
+        self.assertEqual(wd.streak, 0)
+
+    def test_noise_never_fires(self):
+        wd = WakeDetector()
+        for _ in range(10):
+            self.assertFalse(wd.feed("noise", 0.99))
+
+
+class TestWavHeader(unittest.TestCase):
+
+    def test_length_and_fixed_fields(self):
+        h = build_wav_header(0)
+        self.assertEqual(len(h), 44)
+        self.assertEqual(h[0:4], b"RIFF")
+        self.assertEqual(h[8:12], b"WAVE")
+        self.assertEqual(h[36:40], b"data")
+        # 16 kHz, mono, 16-bit
+        self.assertEqual(struct.unpack("<I", h[24:28])[0], 16000)
+        self.assertEqual(struct.unpack("<H", h[22:24])[0], 1)
+        self.assertEqual(struct.unpack("<H", h[34:36])[0], 16)
+        self.assertEqual(struct.unpack("<I", h[28:32])[0], 32000)  # byte rate
+
+    def test_sizes_patched_with_data_len(self):
+        n = 32000  # ~1 s of audio
+        h = build_wav_header(n)
+        self.assertEqual(struct.unpack("<I", h[4:8])[0], 36 + n)    # ChunkSize
+        self.assertEqual(struct.unpack("<I", h[40:44])[0], n)        # Subchunk2Size
 
 
 class TestMaxReminders(unittest.TestCase):
-    """Mirrors the MAX_REMINDERS=10 guard in reminder_add_voice()"""
+    """Mirrors the MAX_REMINDERS=10 guard in reminder_add_voice()."""
 
     MAX_REMINDERS = 10
 
     def test_at_capacity_does_not_add(self):
-        saved = [{'hour': i, 'text': f'reminder {i}'} for i in range(self.MAX_REMINDERS)]
-        # Simulate adding one more
+        saved = [{"hour": i, "text": f"reminder {i}"} for i in range(self.MAX_REMINDERS)]
         if len(saved) >= self.MAX_REMINDERS:
             overflowed = True
         else:
-            saved.append({'hour': 99, 'text': 'overflow'})
+            saved.append({"hour": 99, "text": "overflow"})
             overflowed = False
         self.assertTrue(overflowed)
         self.assertEqual(len(saved), self.MAX_REMINDERS)
@@ -456,9 +422,9 @@ class TestMaxReminders(unittest.TestCase):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys, io
     # Force UTF-8 output on Windows terminals
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    print('\n[Ronnie] Unit Tests -- Logic Layer\n' + '-' * 40)
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    print("\n[Ronnie] Unit Tests -- Logic Layer (v8)\n" + "-" * 40)
     unittest.main(verbosity=2)

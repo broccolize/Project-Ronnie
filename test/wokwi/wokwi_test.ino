@@ -31,7 +31,8 @@
  * WHAT IS STUBBED:
  *   ✗ DFPlayer (audio) — silent; play() calls logged to Serial
  *   ✗ I2S microphone  — voice commands not active
- *   ✗ SD card         — enrollment and TTS cache unavailable
+ *   ✗ SD card         — STT capture (cmd.wav) and TTS cache unavailable
+ *   ✗ Whisper server  — command transcription not reachable in sim
  *   ✗ Edge Impulse    — stub returns 0 confidence always
  */
 
@@ -84,7 +85,7 @@ void drawFace(FaceState state) {
             u8g2.drawStr(72,20,"zzz"); u8g2.drawHLine(48,52,32);
             break;
         case BOOTING:
-            u8g2.drawStr(10,30,"RONNIE v4.0"); u8g2.drawStr(10,44,"Wokwi sim...");
+            u8g2.drawStr(10,30,"RONNIE v8.0"); u8g2.drawStr(10,44,"Wokwi sim...");
             break;
     }
     u8g2.sendBuffer();

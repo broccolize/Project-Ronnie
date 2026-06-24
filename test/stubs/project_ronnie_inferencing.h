@@ -24,31 +24,16 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// ── Label definitions ───────────────────────────────────────────────────────
+// ── Label definitions (v8 — two classes only) ───────────────────────────────
 // Must match what you name your training labels in Edge Impulse exactly.
-// Add more as you train them.
+// v8 reduced the model to a 2-class wake word; all command/number words moved
+// to the laptop Whisper server. Do NOT re-add command labels here.
 
-#define EI_CLASSIFIER_LABEL_COUNT  26
+#define EI_CLASSIFIER_LABEL_COUNT  2
 
 static const char* ei_classifier_inferencing_categories[EI_CLASSIFIER_LABEL_COUNT] = {
-    // Core commands
-    "hey_ronnie",
-    "time",
-    "date",
-    "time_and_date",
-    "weather",
-    "set_alarm",
-    "reminder",
-    "good_morning",
-    "battery",
-    // Number words (for voice reminder hour stage — NEW v4)
-    "one", "two", "three", "four", "five", "six",
-    "seven", "eight", "nine", "ten", "eleven", "twelve",
-    // AM/PM (for voice reminder — NEW v4)
-    "am",
-    "pm",
-    // Background noise — always include this class
-    "noise",
+    "hey_ronnie",   // wake word
+    "noise",        // everything else (ambience, speech, confusers)
 };
 
 // ── Signal type ─────────────────────────────────────────────────────────────
