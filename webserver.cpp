@@ -2,16 +2,12 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <SD.h>
 #include "webserver.h"
 #include "face.h"
 #include "alarm.h"
 #include "reminder.h"
-#include "enrollment.h"
 #include "config.h"
 
-extern String pendingEnrollLabel;
-extern bool   enrollRequested;
 extern AppConfig appConfig;
 
 // LittleFS mutex — defined in project_ronnie.ino, protects concurrent access
@@ -124,120 +120,8 @@ void setupWebServer() {
         }
     );
 
-    // ── Tasks (voice enrollment vocabulary) ───────────────────────────────────
-    server.on("/tasks", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (xSemaphoreTake(fsMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-            req->send(503, "text/plain", "Device busy"); return;
-        }
-        File f = LittleFS.open("/config.json", "r");
-        JsonDocument doc;
-        deserializeJson(doc, f);
-        f.close();
-        xSemaphoreGive(fsMutex);
-        String out;
-        serializeJson(doc["tasks"], out);
-        req->send(200, "application/json", out);
-    });
-
-    server.on("/tasks", HTTP_POST,
-        [](AsyncWebServerRequest* req) {},
-        NULL,
-        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            if (!pinOk(req)) { req->send(401, "text/plain", "Unauthorized"); return; }
-            if (total > 256) { req->send(413, "text/plain", "Too large"); return; }
-            JsonDocument incoming;
-            if (deserializeJson(incoming, (const char*)data, len)) {
-                req->send(400, "text/plain", "Invalid JSON"); return;
-            }
-            if (xSemaphoreTake(fsMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-                req->send(503, "text/plain", "Device busy"); return;
-            }
-            File f = LittleFS.open("/config.json", "r");
-            JsonDocument doc;
-            deserializeJson(doc, f);
-            f.close();
-            if (!doc["tasks"].is<JsonArray>()) doc["tasks"].to<JsonArray>();
-            JsonObject t  = doc["tasks"].as<JsonArray>().add<JsonObject>();
-            t["label"]    = incoming["label"];
-            t["text"]     = incoming["text"];
-            t["mp3"]      = incoming["mp3"] | 10;
-            t["enrolled"] = false;
-            File fw = LittleFS.open("/config.json", "w");
-            serializeJson(doc, fw);
-            fw.close();
-            xSemaphoreGive(fsMutex);
-            req->send(200, "text/plain", "Task saved. Now enroll a voice sample.");
-        }
-    );
-
-    server.on("/tasks/delete", HTTP_POST,
-        [](AsyncWebServerRequest* req) {},
-        NULL,
-        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            if (!pinOk(req)) { req->send(401, "text/plain", "Unauthorized"); return; }
-            JsonDocument incoming;
-            if (deserializeJson(incoming, (const char*)data, len)) {
-                req->send(400, "text/plain", "Invalid JSON"); return;
-            }
-            const char* del = incoming["label"] | "";
-            if (strlen(del) == 0) { req->send(400, "text/plain", "Missing label"); return; }
-
-            String sPath = String("/samples/") + del + ".raw";
-            if (SD.exists(sPath)) SD.remove(sPath);
-
-            if (xSemaphoreTake(fsMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-                req->send(503, "text/plain", "Device busy"); return;
-            }
-            File f = LittleFS.open("/config.json", "r");
-            JsonDocument doc;
-            deserializeJson(doc, f);
-            f.close();
-
-            // Rebuild the tasks array without the deleted entry
-            JsonDocument newDoc;
-            newDoc["city"]            = doc["city"];
-            newDoc["country"]         = doc["country"];
-            newDoc["owm_key"]         = doc["owm_key"];
-            newDoc["tts_key"]         = doc["tts_key"];
-            newDoc["timezone_offset"] = doc["timezone_offset"];
-            newDoc["volume"]          = doc["volume"];
-            if (!doc["portal_pin"].isNull()) newDoc["portal_pin"] = doc["portal_pin"];
-            JsonArray newTasks = newDoc["tasks"].to<JsonArray>();
-            for (JsonObject task : doc["tasks"].as<JsonArray>()) {
-                if (strcmp(task["label"] | "", del) != 0) {
-                    JsonObject nt  = newTasks.add<JsonObject>();
-                    nt["label"]    = task["label"];
-                    nt["text"]     = task["text"];
-                    nt["mp3"]      = task["mp3"];
-                    nt["enrolled"] = task["enrolled"];
-                }
-            }
-            File fw = LittleFS.open("/config.json", "w");
-            serializeJson(newDoc, fw);
-            fw.close();
-            xSemaphoreGive(fsMutex);
-
-            enrollment_setup();
-            req->send(200, "text/plain", "Deleted");
-        }
-    );
-
-    // ── Enrollment trigger ─────────────────────────────────────────────────────
-    server.on("/enroll", HTTP_POST,
-        [](AsyncWebServerRequest* req) {},
-        NULL,
-        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t index, size_t total) {
-            if (!pinOk(req)) { req->send(401, "text/plain", "Unauthorized"); return; }
-            JsonDocument incoming;
-            if (deserializeJson(incoming, (const char*)data, len)) {
-                req->send(400, "text/plain", "Invalid JSON"); return;
-            }
-            pendingEnrollLabel = incoming["label"].as<String>();
-            enrollRequested    = true;
-            req->send(200, "text/plain",
-                "Enrollment started. Ronnie will beep — say the word now.");
-        }
-    );
+    // V8: voice task-word enrollment removed — reminders are set by voice
+    // (single-utterance, transcript becomes the text) or via the portal below.
 
     server.begin();
     String ip = WiFi.localIP().toString();

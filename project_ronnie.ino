@@ -15,7 +15,7 @@
 #include "reminder.h"
 #include "battery.h"
 #include "webserver.h"
-#include "enrollment.h"
+#include "stt.h"
 #include "tts.h"
 #include "timer.h"
 
@@ -36,11 +36,12 @@ AppConfig appConfig;
 // or webserver code can run.
 SemaphoreHandle_t fsMutex = NULL;
 
-// V4-2: Enrollment flags — set by /enroll endpoint, consumed in loop()
-String pendingEnrollLabel = "";
-bool   enrollRequested    = false;
-
 bool serverStarted = false;
+
+// V8: CPU frequency helpers. Idle at 80 MHz for battery life; raise to 240 MHz
+// around the wake/capture/upload path (called from voice.cpp).
+void cpu_fast() { setCpuFrequencyMhz(240); }
+void cpu_idle() { setCpuFrequencyMhz(80);  }
 
 // Config button: hold GPIO 4 for 3 s to enter web config
 #define CONFIG_BUTTON_PIN 4
@@ -50,7 +51,7 @@ static unsigned long configBtnPressTime = 0;
 unsigned long gmWeatherScheduledAt = 0;
 
 void loadConfig() {
-    appConfig = { "London", "", "", 0, 25, "" };
+    appConfig = { "London", "", "", 0, 25, "", "" };
     xSemaphoreTake(fsMutex, portMAX_DELAY);
     bool exists = LittleFS.exists("/config.json");
     if (!exists) { xSemaphoreGive(fsMutex); return; }
@@ -64,6 +65,7 @@ void loadConfig() {
         appConfig.timezoneOffset = doc["timezone_offset"] | 0L;
         appConfig.volume         = doc["volume"]          | 25;
         appConfig.portalPin      = doc["portal_pin"]      | "";
+        appConfig.whisperUrl     = doc["whisper_url"]     | "";
     }
     f.close();
     xSemaphoreGive(fsMutex);
@@ -157,9 +159,11 @@ void setup() {
     alarm_setup();
     reminder_setup();
     battery_setup();
-    enrollment_setup();
+    stt_setup();
     tts_setup();
     timer_setup();
+
+    cpu_idle();  // 80 MHz idle default — the wake path raises to 240 MHz briefly
 
     drawFace(IDLE);
     dfPlayer.play(1);
@@ -171,18 +175,10 @@ void loop() {
     alarm_ring_tick();
     timer_loop();
 
-    // V4-2: Voice enrollment
-    if (enrollRequested) {
-        enrollRequested = false;
-        drawFace(THINKING);
-        enrollment_record(pendingEnrollLabel);
-        drawFace(IDLE);
-    }
-
-    // Trigger weather after Good Morning greeting
+    // Trigger weather after Good Morning greeting (intent now lives in arg 2)
     if (gmWeatherScheduledAt > 0 && millis() > gmWeatherScheduledAt) {
         gmWeatherScheduledAt = 0;
-        handleCommand("weather", "");
+        handleCommand("", "weather");
     }
 
     // 10-second periodic checks

@@ -3,6 +3,11 @@
 
 extern DFRobotDFPlayerMini dfPlayer;
 
+// V8/D6: gap between chained offline clips. Reduced from the old ~820ms so a
+// multi-clip answer (e.g. temperature) sounds natural and finishes quickly.
+// This file is output-only — never used for recognition.
+#define CLIP_GAP 300
+
 // Speak a number 1–59 using the pre-recorded clips in SD folder /03/.
 // File naming on the SD card: /03/001.mp3 = "one", /03/023.mp3 = "twenty-three", etc.
 // Returns immediately (DFPlayer queues the play internally).
@@ -21,13 +26,13 @@ void numtts_speak_temperature(float tempC) {
 
     if (t < 0) {
         dfPlayer.playFolder(NUMTTS_CLIPS_FOLDER, 60);  // "minus"
-        delay(700);
+        delay(CLIP_GAP);
         t = -t;
     }
 
     if (t >= 1 && t <= 59) {
         dfPlayer.playFolder(NUMTTS_CLIPS_FOLDER, t);
-        delay(900);
+        delay(CLIP_GAP);
     }
 
     dfPlayer.playFolder(NUMTTS_CLIPS_FOLDER, 61);  // "degrees"

@@ -6,7 +6,7 @@
 // Shared dfPlayer instance — defined in project_ronnie.ino.
 extern DFRobotDFPlayerMini dfPlayer;
 
-// Reminder data structure — declared here so voice.cpp and enrollment.cpp can use it.
+// Reminder data structure — declared here so commands.cpp can build voice reminders.
 struct Reminder {
     int  hour;
     int  minute;

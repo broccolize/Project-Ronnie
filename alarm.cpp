@@ -148,3 +148,5 @@ void alarm_ring_tick() {
 }
 
 void alarm_save() { alarm_save_triggered(); }
+
+bool alarm_is_ringing() { return alarmRinging; }

@@ -1,6 +1,9 @@
 {
   "city": "London",
+  "country": "UK",
   "timezone_offset": 0,
   "owm_key": "YOUR_OPENWEATHERMAP_API_KEY_HERE",
+  "tts_key": "YOUR_ELEVENLABS_API_KEY_HERE",
+  "whisper_url": "http://192.168.1.50:8000/transcribe",
   "volume": 25
 }

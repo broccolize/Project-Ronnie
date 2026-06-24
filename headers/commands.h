@@ -9,7 +9,7 @@ extern RTC_DS3231           rtc;
 extern bool                 wifiConnected;
 extern unsigned long        gmWeatherScheduledAt;
 
-// Dispatch a recognised voice command.
-// label     — one of the Edge Impulse category strings
-// rawSpeech — full speech transcript (used for alarm/reminder time parsing)
-void handleCommand(const char* label, const String& rawSpeech);
+// Dispatch a voice command (V8).
+// label      — unused; kept so existing call sites compile
+// transcript — the full Whisper transcript; intent is derived from this text
+void handleCommand(const char* label, const String& transcript);

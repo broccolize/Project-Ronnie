@@ -13,3 +13,4 @@ void alarm_check(DateTime now);
 void alarm_ring(int idx);
 void alarm_ring_tick();               // non-blocking double-tap poll — call every loop() iteration
 void alarm_save();                    // public alias for alarm_save_triggered()
+bool alarm_is_ringing();              // true while an alarm is actively ringing

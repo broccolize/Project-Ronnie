@@ -1,10 +1,11 @@
-#include <project_ronnie_inferencing.h>  // Edge Impulse exported SDK — not in repo
+#include <project_ronnie_inferencing.h>  // Edge Impulse exported SDK (2-class wake word) — not in repo
 #include <driver/i2s.h>
 #include "voice.h"
 #include "commands.h"
+#include "config.h"
 #include "face.h"
-#include "enrollment.h"
-#include "reminder.h"
+#include "stt.h"
+#include "alarm.h"
 #include <DFRobotDFPlayerMini.h>
 
 extern DFRobotDFPlayerMini dfPlayer;
@@ -15,33 +16,16 @@ extern RTC_DS3231           rtc;
 #define I2S_SD            33
 #define AUDIO_BUFFER_SIZE 16000
 
+#define TOUCH_PIN         34     // TTP223 — also used by alarm double-tap dismiss
+#define WAKE_CHIME        21     // D1: short chime acknowledges the wake word
+#define WAKE_STREAK_MIN    2     // require N consecutive positive windows (§6.3)
+#define WAKE_THRESHOLD  0.80f    // top-class confidence to count as a wake hit
+
 // Heap-allocated inference buffer
 static int16_t* audioBuffer = NULL;
 
-static bool          awake      = false;
-static unsigned long awakeUntil = 0;
-
-// ── V4-1: VOICE STATE MACHINE ─────────────────────────────────────────────
-enum VoiceState {
-    VS_IDLE,
-    VS_REMINDER_WAIT_HOUR,
-    VS_REMINDER_WAIT_AMPM,
-    VS_REMINDER_WAIT_TASK
-};
-
-static VoiceState voiceState = VS_IDLE;
-static int        pendingHour = -1;
-
-static int labelToHour(const char* label) {
-    const char* nums[] = {
-        "one","two","three","four","five","six",
-        "seven","eight","nine","ten","eleven","twelve"
-    };
-    for (int i = 0; i < 12; i++) {
-        if (strcmp(label, nums[i]) == 0) return i + 1;
-    }
-    return -1;
-}
+// Consecutive-window counter for wake confirmation (false-accept reduction)
+static int wakeStreak = 0;
 
 void voice_setup() {
     i2s_config_t cfg = {
@@ -73,12 +57,46 @@ void voice_setup() {
     if (!audioBuffer) Serial.println("FATAL: audio buffer malloc failed");
 }
 
+// Run the full wake body: chime → record → transcribe → route to handleCommand.
+// Shared by the wake word and the touch-button trigger (D2).
+static void run_wake_capture() {
+    cpu_fast();
+    drawFace(THINKING);          // LISTENING / capture visual (reuse THINKING)
+    dfPlayer.play(WAKE_CHIME);   // D1: short chime, not the old 0068 spoken line
+    delay(250);                  // let the chime start before we open the mic
+
+    String text = stt_capture_and_transcribe();
+    cpu_idle();
+
+    if (text.isEmpty()) {
+        // No server / WiFi down / no speech / server error → offline clip (D5, §9)
+        dfPlayer.play(100);
+        drawFace(IDLE);
+    } else {
+        Serial.printf("Transcript: %s\n", text.c_str());
+        handleCommand("", text);  // intent derived from the transcript inside handleCommand
+    }
+}
+
 void voice_loop() {
     if (!audioBuffer) return;
 
+    // ── D2: touch-button trigger ──────────────────────────────────────────────
+    // A deliberate press while idle skips the wake word and records directly.
+    // Skip while an alarm is ringing — that press belongs to the dismiss logic.
+    static bool touchPrev = false;
+    bool touchNow = (digitalRead(TOUCH_PIN) == HIGH);
+    if (touchNow && !touchPrev && !alarm_is_ringing()) {
+        touchPrev = touchNow;
+        wakeStreak = 0;
+        run_wake_capture();
+        return;
+    }
+    touchPrev = touchNow;
+
     // Accumulate samples in a static buffer; only run inference once a full
-    // 1-second window (16 000 samples) has been collected.  Reading small
-    // chunks (512 samples, ~32 ms) keeps loop() responsive while ensuring the
+    // 1-second window (16 000 samples) has been collected. Reading small chunks
+    // (512 samples, ~32 ms) keeps loop() responsive while ensuring the
     // classifier always receives a complete, non-padded audio window.
     static int16_t accumBuf[AUDIO_BUFFER_SIZE];
     static size_t  accumPos = 0;
@@ -94,35 +112,7 @@ void voice_loop() {
     memcpy(audioBuffer, accumBuf, AUDIO_BUFFER_SIZE * sizeof(int16_t));
     accumPos = 0;
 
-    // ── V4-1: TASK STAGE — enrollment matcher, not Edge Impulse ─────────────
-    if (voiceState == VS_REMINDER_WAIT_TASK) {
-        if (!awake || millis() > awakeUntil) {
-            voiceState  = VS_IDLE;
-            awake       = false;
-            pendingHour = -1;
-            dfPlayer.play(99);
-            return;
-        }
-        int matchIdx = enrollment_match(audioBuffer, AUDIO_BUFFER_SIZE);
-        if (matchIdx < 0) return;
-
-        String taskText = enrollment_getMatchedText(matchIdx);
-        Reminder r      = {};
-        r.hour   = pendingHour;
-        r.minute = 0;
-        r.mp3    = 10;
-        strlcpy(r.text, taskText.c_str(), sizeof(r.text));
-        reminder_add_voice(r);
-
-        dfPlayer.play(20);
-        drawFace(HAPPY);
-        voiceState  = VS_IDLE;
-        pendingHour = -1;
-        awake       = false;
-        return;
-    }
-
-    // ── RUN EDGE IMPULSE ─────────────────────────────────────────────────────
+    // ── RUN EDGE IMPULSE (2-class wake word: hey_ronnie / noise) ───────────────
     signal_t            signal;
     ei_impulse_result_t result;
     numpy::signal_from_buffer(audioBuffer, AUDIO_BUFFER_SIZE, &signal);
@@ -141,50 +131,24 @@ void voice_loop() {
             bestIdx  = i;
         }
     }
-    if (maxScore < 0.80f || bestIdx < 0) return;
 
-    const char* label = ei_classifier_inferencing_categories[bestIdx];
+    const char* label = (bestIdx >= 0)
+        ? ei_classifier_inferencing_categories[bestIdx]
+        : "";
 
-    if (strcmp(label, "hey_ronnie") == 0) {
-        awake      = true;
-        awakeUntil = millis() + 5000;
-        voiceState = VS_IDLE;
-        drawFace(HAPPY);
-        dfPlayer.play(68);
+    // Wake confirmation: require WAKE_STREAK_MIN consecutive positive windows
+    // above threshold before firing — the single biggest false-accept reduction.
+    if (bestIdx >= 0 && maxScore >= WAKE_THRESHOLD &&
+        strcmp(label, "hey_ronnie") == 0) {
+        wakeStreak++;
+    } else {
+        wakeStreak = 0;
         return;
     }
 
-    if (!awake || millis() > awakeUntil) { awake = false; return; }
-
-    // ── V4-1: REMINDER STATE MACHINE ─────────────────────────────────────────
-    if (voiceState == VS_REMINDER_WAIT_HOUR) {
-        int h = labelToHour(label);
-        if (h < 0) { dfPlayer.play(99); voiceState = VS_IDLE; awake = false; return; }
-        pendingHour = h;
-        voiceState  = VS_REMINDER_WAIT_AMPM;
-        dfPlayer.play(81);
-        awakeUntil = millis() + 8000;
-        return;
+    if (wakeStreak >= WAKE_STREAK_MIN) {
+        wakeStreak = 0;
+        accumPos   = 0;   // drop any partial window before capturing the command
+        run_wake_capture();
     }
-
-    if (voiceState == VS_REMINDER_WAIT_AMPM) {
-        if (strcmp(label, "pm") == 0 && pendingHour < 12) pendingHour += 12;
-        if (strcmp(label, "am") == 0 && pendingHour == 12) pendingHour = 0;
-        voiceState = VS_REMINDER_WAIT_TASK;
-        dfPlayer.play(82);
-        awakeUntil = millis() + 8000;
-        awake      = true;
-        return;
-    }
-
-    // ── NORMAL COMMANDS (VS_IDLE) ─────────────────────────────────────────────
-    if (strcmp(label, "reminder") == 0) {
-        voiceState = VS_REMINDER_WAIT_HOUR;
-        dfPlayer.play(80);
-        awakeUntil = millis() + 8000;
-        return;
-    }
-
-    awake = false;
-    handleCommand(label, "");
 }

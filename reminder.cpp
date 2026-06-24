@@ -3,9 +3,13 @@
 #include <RTClib.h>
 #include "reminder.h"
 #include "face.h"
+#include "config.h"
+#include "tts.h"
 
 extern DFRobotDFPlayerMini dfPlayer;
 extern SemaphoreHandle_t   fsMutex;
+extern AppConfig           appConfig;
+extern bool                wifiConnected;
 
 #define MAX_REMINDERS 10
 
@@ -76,6 +80,13 @@ static void enqueue_mp3(int mp3, unsigned long fireAt) {
     pendingTail = next;
 }
 
+// V8/D4: a reminder with mp3 == 0 carries its text in the transcript itself and
+// is spoken back via ElevenLabs TTS (no pre-recorded task clip). One deferred
+// slot is enough — reminders rarely fire simultaneously, and the on-screen text
+// is always shown regardless of whether speech succeeds.
+static String        pendingTtsText = "";
+static unsigned long pendingTtsAt   = 0;
+
 void reminder_tick() {
     while (pendingHead != pendingTail) {
         if (millis() > pendingMp3At[pendingHead]) {
@@ -84,6 +95,18 @@ void reminder_tick() {
         } else {
             break;  // queue is ordered by fire time; stop at first future entry
         }
+    }
+
+    if (pendingTtsAt > 0 && millis() > pendingTtsAt) {
+        unsigned long at = pendingTtsAt;
+        pendingTtsAt = 0;
+        // Only attempt TTS when online with a key — otherwise the prefix clip
+        // plus the on-screen reminder text already conveyed it.
+        if (wifiConnected && !appConfig.ttsKey.isEmpty()) {
+            String key = "rem_" + String(at);
+            tts_speak(pendingTtsText, key);
+        }
+        pendingTtsText = "";
     }
 }
 
@@ -110,7 +133,13 @@ void reminder_check(DateTime now) {
             face_set_reminder_text(r.text);
             drawFace(REMINDER_SHOW);
             dfPlayer.play(7);  // "You are forgetting something..."
-            enqueue_mp3(r.mp3, millis() + 2500);
+            if (r.mp3 == 0) {
+                // D4: speak the reminder text itself via TTS after the prefix
+                pendingTtsText = String(r.text);
+                pendingTtsAt   = millis() + 2500;
+            } else {
+                enqueue_mp3(r.mp3, millis() + 2500);
+            }
         }
     }
 }
